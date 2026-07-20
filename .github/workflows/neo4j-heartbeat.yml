@@ -31,7 +31,7 @@ jobs:
 
           driver = GraphDatabase.driver(uri, auth=(user, password))
           with driver.session() as session:
-              result = session.run("MATCH (s:Sample) RETURN count(s) AS n")
+              result = session.run("MATCH (s:SRARun) RETURN count(s) AS n")
               n = result.single()["n"]
               print(f"✅ Neo4j alive — {n} Sample nodes")
           driver.close()
