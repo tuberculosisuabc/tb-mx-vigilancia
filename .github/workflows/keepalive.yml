@@ -1,0 +1,39 @@
+name: Keep Alive
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # cada 6 horas
+  workflow_dispatch:
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      #Commit vacio para manterne github repo activo 
+      - name: Keep repo active
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep workflows active [skip ci]"
+          git push
+
+      # ── Ping Streamlit ───────────────────────────────────────────
+      - name: Ping Streamlit app
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 10 \
+            https://svg-tb-mx.streamlit.app)
+          echo "Streamlit HTTP status: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+            echo "✅ Streamlit app is alive"
+          else
+            echo "⚠️  Unexpected status: $STATUS (app may be waking up)"
+          fi

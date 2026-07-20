@@ -1,0 +1,164 @@
+name: Actualizar TB-MX Pipeline
+
+on:
+  workflow_dispatch:          # botón manual en GitHub Actions
+  schedule:
+    - cron: '0 6 1 */2 *'    # automático: día 1 de cada 2 meses a las 6am UTC
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340      # 5h 40min (suficiente para ~30 muestras nuevas) 
+
+#1. INSTALAR EN GITHUB PROGRAMAS/PAQUETES NECESARIOS PARA EJECUCIÓN
+    steps:  
+      # 1.1 Código 
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      # 1.2 Python 
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias Python
+        run: |
+          pip install \
+ 	    biopython \
+            tb-profiler \
+            neo4j \
+            pandas \
+            scipy \
+            numpy \
+            pyyaml
+
+      # 1.3 Herramientas bioinformáticas
+      - name: Instalar herramientas del sistema
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            bwa samtools bcftools \
+            ncbi-entrez-direct
+
+      - name: Instalar SRA Toolkit
+        run: |
+          wget -q https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/current/sratoolkit.current-ubuntu64.tar.gz
+          tar -xzf sratoolkit.current-ubuntu64.tar.gz
+          SRADIR=$(ls -d sratoolkit.*-ubuntu64 | head -1)
+          echo "$PWD/$SRADIR/bin" >> $GITHUB_PATH
+          prefetch --version
+
+      - name: Actualizar base de datos de TB-Profiler
+        run: tb-profiler update_db
+
+#2. RESTAURAR JSONS HISTORICOS DESDE GITHUB RELEASE (JSONs de la primera corrida JUN 2025)
+      - name: Restaurar JSONs históricos
+        run: |
+          mkdir -p ~/json_cache
+          # Descargar el release más reciente que tenga "data" en el tag
+          LATEST_TAG=$(gh release list --repo ${{ github.repository }} \
+            --json tagName,name \
+            --jq '[.[] | select(.tagName | contains("data"))] | .[0].tagName')
+          echo "Usando release: $LATEST_TAG"
+
+          gh release download "$LATEST_TAG" \
+            --repo ${{ github.repository }} \
+            --pattern "tb_mx_results_*.tar.gz" \
+            --dir /tmp/
+
+          TARFILE=$(ls /tmp/tb_mx_results_*.tar.gz | head -1)
+          tar -xzf "$TARFILE" -C ~/json_cache/ --strip-components=1 2>/dev/null || \
+          tar -xzf "$TARFILE" -C ~/json_cache/
+
+          COUNT=$(ls ~/json_cache/*.results.json 2>/dev/null | wc -l)
+          echo "JSONs restaurados: $COUNT"
+          echo "json_count=$COUNT" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+#3. BUSCAR NUEVOS RUNS, COMPARAR RESULTADOS DE FETCH ACTUAL CON INICIAL
+	#3.1 Identificar nuevos runs 
+      - name: "Paso 1: Identificar runs nuevos en metadata_cleaned.csv"
+        run: python pipeline/update_01_fetch_new.py
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+      - name: Verificar si hay muestras nuevas
+        id: check
+        run: |
+          if [ -f ~/new_runs.txt ] && [ -s ~/new_runs.txt ]; then
+            COUNT=$(wc -l < ~/new_runs.txt | tr -d ' ')
+            echo "has_new=true"  >> $GITHUB_OUTPUT
+            echo "count=$COUNT"  >> $GITHUB_OUTPUT
+            echo " $COUNT RUN NUEVOS ENCONTRADOS:"
+            cat ~/new_runs.txt
+          else
+            echo "has_new=false" >> $GITHUB_OUTPUT
+            echo "count=0"       >> $GITHUB_OUTPUT
+            echo "SIN MUESTRAS NUEVAS, PIPELINE TERMINADO."
+          fi
+
+      # 3.2 : TB-Profiler (solo si hay nuevos runs)
+      - name: "Paso 2: Correr TB-Profiler en runs nuevos"
+        if: steps.check.outputs.has_new == 'true'
+        run: python pipeline/update_02_run_tbprofiler.py
+
+      # 3.3 : Generar CSVs (solo si hay nuevos)
+      - name: "Paso 3: Generar CSVs incrementales"
+        if: steps.check.outputs.has_new == 'true'
+        run: python pipeline/update_03_generate_csvs.py
+
+      # 3.4: Cargar a Neo4j (solo si hay nuevos)
+      - name: "Paso 4: Cargar a Neo4j"
+        if: steps.check.outputs.has_new == 'true'
+        run: python pipeline/update_04_load_neo4j.py
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+# 4. EMPACAR Y PUBLICAR NUEVO RELEASE CON LOS DATOS ACTUALIZADOS
+      - name: Empacar JSONs actualizados
+        if: steps.check.outputs.has_new == 'true'
+        run: |
+          # Los JSONs nuevos ya están en ~/json_cache/ (los guardó el paso 2)
+          TOTAL=$(ls ~/json_cache/*.results.json | wc -l)
+          echo "Total JSONs a empacar: $TOTAL"
+          tar -czf /tmp/tb_mx_results_latest.tar.gz \
+            -C ~/json_cache .
+          ls -lh /tmp/tb_mx_results_latest.tar.gz
+
+      - name: Publicar Release con datos actualizados
+        if: steps.check.outputs.has_new == 'true'
+        run: |
+          TAG="v$(date +'%Y.%m')-data"
+          TOTAL=$(ls ~/json_cache/*.results.json | wc -l)
+          gh release create "$TAG" \
+            --repo ${{ github.repository }} \
+            --title "Datos TB-MX — $(date +'%B %Y') ($TOTAL muestras)" \
+            --notes "Actualización automática: ${{ steps.check.outputs.count }} runs nuevos. Total acumulado: $TOTAL JSONs." \
+            /tmp/tb_mx_results_latest.tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+#5. RESUMEN 
+      - name: Resumen del pipeline
+        if: always()
+        run: |
+          echo "## Resultado del pipeline TB-MX" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Paso | Estado |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| JSONs históricos restaurados | ${{ env.json_count }} archivos |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runs nuevos encontrados | ${{ steps.check.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check.outputs.has_new }}" = "true" ]; then
+            echo "| TB-Profiler | Ejecutado |" >> $GITHUB_STEP_SUMMARY
+            echo "| Neo4j | Actualizado |" >> $GITHUB_STEP_SUMMARY
+            echo "| Release | Publicado |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| TB-Profiler | Sin muestras nuevas |" >> $GITHUB_STEP_SUMMARY
+          fi

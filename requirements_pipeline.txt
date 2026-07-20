@@ -1,0 +1,7 @@
+biopython
+neo4j
+pandas
+scipy
+numpy
+pyyaml
+tb-profiler

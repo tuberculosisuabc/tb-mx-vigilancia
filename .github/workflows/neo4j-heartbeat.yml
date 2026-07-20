@@ -1,0 +1,38 @@
+name: Neo4j Heartbeat
+
+on:
+  schedule:
+    - cron: '0 */8 * * *' 
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install neo4j driver
+        run: pip install neo4j
+
+      - name: Ping Neo4j
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          python3 - <<'EOF'
+          import os
+          from neo4j import GraphDatabase
+
+          uri      = os.environ["NEO4J_URI"]
+          user     = os.environ["NEO4J_USER"]
+          password = os.environ["NEO4J_PASSWORD"]
+
+          if not uri:
+              raise ValueError("NEO4J_URI secret is empty — check repo secrets")
+
+          driver = GraphDatabase.driver(uri, auth=(user, password))
+          with driver.session() as session:
+              result = session.run("MATCH (s:Sample) RETURN count(s) AS n")
+              n = result.single()["n"]
+              print(f"✅ Neo4j alive — {n} Sample nodes")
+          driver.close()
+          EOF
