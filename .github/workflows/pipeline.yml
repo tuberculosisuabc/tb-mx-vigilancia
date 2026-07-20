@@ -79,7 +79,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 #3. BUSCAR NUEVOS RUNS, COMPARAR RESULTADOS DE FETCH ACTUAL CON INICIAL
-	#3.1 Identificar nuevos runs 
+#3.1 Identificar nuevos runs 
       - name: "Paso 1: Identificar runs nuevos en metadata_cleaned.csv"
         run: python pipeline/update_01_fetch_new.py
         env:
@@ -102,17 +102,17 @@ jobs:
             echo "SIN MUESTRAS NUEVAS, PIPELINE TERMINADO."
           fi
 
-      # 3.2 : TB-Profiler (solo si hay nuevos runs)
+    # 3.2 : TB-Profiler (solo si hay nuevos runs)
       - name: "Paso 2: Correr TB-Profiler en runs nuevos"
         if: steps.check.outputs.has_new == 'true'
         run: python pipeline/update_02_run_tbprofiler.py
 
-      # 3.3 : Generar CSVs (solo si hay nuevos)
+    # 3.3 : Generar CSVs (solo si hay nuevos)
       - name: "Paso 3: Generar CSVs incrementales"
         if: steps.check.outputs.has_new == 'true'
         run: python pipeline/update_03_generate_csvs.py
 
-      # 3.4: Cargar a Neo4j (solo si hay nuevos)
+    # 3.4: Cargar a Neo4j (solo si hay nuevos)
       - name: "Paso 4: Cargar a Neo4j"
         if: steps.check.outputs.has_new == 'true'
         run: python pipeline/update_04_load_neo4j.py
