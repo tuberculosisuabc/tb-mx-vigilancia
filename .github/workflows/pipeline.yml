@@ -26,7 +26,7 @@ jobs:
       - name: Instalar dependencias Python
         run: |
           pip install \
- 	    	biopython \
+            biopython \
             tb-profiler \
             neo4j \
             pandas \
