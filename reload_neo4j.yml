@@ -1,0 +1,44 @@
+name: Recargar Neo4j datos historicos
+
+on:
+  workflow_dispatch:
+
+jobs:
+  reload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install neo4j pandas
+
+      - name: Descargar CSVs desde GitHub Release
+        run: |
+          mkdir -p $HOME/neo4j_export
+          gh release download v1.0-data \
+            --repo ${{ github.repository }} \
+            --pattern "tb_mx_neo4j_export_v1.tar.gz" \
+            --dir /tmp/
+          tar -xzf /tmp/tb_mx_neo4j_export_v1.tar.gz -C $HOME/neo4j_export/
+          echo "CSVs extraidos:"
+          ls $HOME/neo4j_export/
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Copiar metadata_cleaned.csv
+        run: cp metadata_cleaned.csv $HOME/metadata_cleaned.csv
+
+      - name: Cargar todos los datos a Neo4j
+        run: python pipeline/04_cargarneo4j.py
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
