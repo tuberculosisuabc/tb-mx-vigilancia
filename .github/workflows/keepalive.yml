@@ -30,7 +30,7 @@ jobs:
             --max-time 30 \
             --retry 3 \
             --retry-delay 10 \
-            https://svg-tb-mx.streamlit.app)
+            https://tb-mx-vigilancia.streamlit.app/)
           echo "Streamlit HTTP status: $STATUS"
           if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
             echo "✅ Streamlit app is alive"
