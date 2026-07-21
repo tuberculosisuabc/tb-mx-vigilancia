@@ -33,19 +33,23 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Copiar metadata y preparar archivos
-        run: |
-          cp metadata_cleaned.csv $HOME/metadata_cleaned.csv
-          import pandas as pd
-          df = pd.read_csv('metadata_cleaned.csv', dtype=str).fillna('')
-          runs = df['Run'].str.strip().tolist()
-          runs = [r for r in runs if r.startswith(('SRR','ERR','DRR'))]
-          with open('$HOME/new_runs.txt', 'w') as f:
-              f.write('\n'.join(runs))
-          print(f'Runs a cargar: {len(runs)}')
-          "
+      - name: Copiar metadata_cleaned.csv
+        run: cp metadata_cleaned.csv $HOME/metadata_cleaned.csv
 
-      - name: Cargar TODOS los datos a Neo4j
+      - name: Crear new_runs.txt con todos los runs
+        run: |
+          python3 << 'PYEOF'
+          import pandas as pd, os
+          df = pd.read_csv("metadata_cleaned.csv", dtype=str).fillna("")
+          runs = df["Run"].str.strip().tolist()
+          runs = [r for r in runs if r.startswith(("SRR","ERR","DRR"))]
+          out = os.path.join(os.path.expanduser("~"), "new_runs.txt")
+          with open(out, "w") as f:
+              f.write("\n".join(runs))
+          print(f"Runs a cargar: {len(runs)}")
+          PYEOF
+
+      - name: Cargar todos los datos a Neo4j
         run: python pipeline/04_cargarneo4j.py
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
