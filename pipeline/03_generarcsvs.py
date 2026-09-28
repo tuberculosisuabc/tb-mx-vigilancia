@@ -203,7 +203,10 @@ if not df_summary.empty and not df_qc.empty:
         df_qc[["sample_id", "fail_reasons", "num_dr_variants",
                 "num_other_variants", "qc_warnings", "tb_profiler_version", "db_version"]],
         on="sample_id", how="left"
-    )  
+    )
+    # Asegurar que qc_pass viene de df_summary (ya calculado en build_summary_row)
+    if "qc_pass" not in node_sample.columns and "qc_pass" in df_summary.columns:
+        node_sample["qc_pass"] = df_summary.set_index("sample_id")["qc_pass"].reindex(node_sample["sample_id"]).values
 else:
     node_sample = df_summary.copy()
 
