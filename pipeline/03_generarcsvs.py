@@ -200,7 +200,10 @@ log(f"  Mutaciones nuevas       : {len(df_mut)}")
 # Guardar qc_pass ANTES de cualquier merge para no perderla
 qc_pass_map = df_summary.set_index("sample_id")["qc_pass"].to_dict() if not df_summary.empty else {}
 
-# Nodos Sample (merge summary + qc)
+# Guardar qc_pass ANTES del merge para no perderla por conflicto de columnas
+qc_pass_map = df_summary.set_index("sample_id")["qc_pass"].to_dict() if not df_summary.empty else {}
+
+# Nodos Sample (merge summary + qc) — qc_pass NO va en df_qc para evitar _x/_y
 if not df_summary.empty and not df_qc.empty:
     node_sample = df_summary.merge(
         df_qc[["sample_id", "fail_reasons", "num_dr_variants",
@@ -209,6 +212,11 @@ if not df_summary.empty and not df_qc.empty:
     )
 else:
     node_sample = df_summary.copy()
+
+# Restaurar qc_pass (sobrevive todos los merges)
+node_sample["qc_pass"] = node_sample["sample_id"].map(qc_pass_map)
+log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
+
 
 # Integrar metadata geográfica
 try:
