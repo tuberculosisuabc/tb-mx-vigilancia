@@ -200,10 +200,10 @@ log(f"  Mutaciones nuevas       : {len(df_mut)}")
 # Nodos Sample (merge summary + qc)
 if not df_summary.empty and not df_qc.empty:
     node_sample = df_summary.merge(
-        df_qc[["sample_id", "qc_pass", "fail_reasons", "num_dr_variants",
+        df_qc[["sample_id", "fail_reasons", "num_dr_variants",
                 "num_other_variants", "qc_warnings", "tb_profiler_version", "db_version"]],
         on="sample_id", how="left"
-    )
+    )  
 else:
     node_sample = df_summary.copy()
 
