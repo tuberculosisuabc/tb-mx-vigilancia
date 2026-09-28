@@ -197,6 +197,9 @@ df_mut     = pd.DataFrame(mut_rows) if mut_rows else pd.DataFrame()
 log(f"  Resumen muestras nuevas : {len(df_summary)}")
 log(f"  Mutaciones nuevas       : {len(df_mut)}")
 
+# Guardar qc_pass ANTES de cualquier merge para no perderla
+qc_pass_map = df_summary.set_index("sample_id")["qc_pass"].to_dict() if not df_summary.empty else {}
+
 # Nodos Sample (merge summary + qc)
 if not df_summary.empty and not df_qc.empty:
     node_sample = df_summary.merge(
@@ -204,9 +207,6 @@ if not df_summary.empty and not df_qc.empty:
                 "num_other_variants", "qc_warnings", "tb_profiler_version", "db_version"]],
         on="sample_id", how="left"
     )
-    # Asegurar que qc_pass viene de df_summary (ya calculado en build_summary_row)
-    if "qc_pass" not in node_sample.columns and "qc_pass" in df_summary.columns:
-        node_sample["qc_pass"] = df_summary.set_index("sample_id")["qc_pass"].reindex(node_sample["sample_id"]).values
 else:
     node_sample = df_summary.copy()
 
@@ -378,6 +378,10 @@ if not df_clusters.empty and not node_sample.empty:
     )
 
 
+
+# Restaurar qc_pass desde el mapa original (sobrevive todos los merges)
+node_sample["qc_pass"] = node_sample["sample_id"].map(qc_pass_map)
+log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
 
 # PASO 3: Guardar CSVs
 log("\n3. Guardando CSVs en ~/neo4j_export/...")
