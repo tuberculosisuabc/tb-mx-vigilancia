@@ -6,52 +6,84 @@ on:
 jobs:
   reload:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout codigo
         uses: actions/checkout@v4
 
-      - name: Configurar Python
+      - name: Configurar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: Instalar dependencias
-        run: pip install neo4j pandas
-
-      - name: Descargar CSVs desde GitHub Release
+      - name: Instalar dependencias Python
         run: |
-          mkdir -p $HOME/neo4j_export
+          pip install neo4j pandas scipy numpy
+
+      - name: Descargar JSONs historicos del Release
+        run: |
+          mkdir -p ~/json_cache
           gh release download v1.0-data \
             --repo ${{ github.repository }} \
-            --pattern "tb_mx_neo4j_export_v1.tar.gz" \
+            --pattern "tb_mx_results_v1.tar.gz" \
             --dir /tmp/
-          tar -xzf /tmp/tb_mx_neo4j_export_v1.tar.gz -C $HOME/neo4j_export/
-          echo "CSVs extraidos:"
-          ls $HOME/neo4j_export/
+          tar -xzf /tmp/tb_mx_results_v1.tar.gz -C ~/json_cache/
+          COUNT=$(ls ~/json_cache/*.results.json 2>/dev/null | wc -l)
+          echo "JSONs extraidos: $COUNT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Copiar metadata_cleaned.csv
-        run: cp metadata_cleaned.csv $HOME/metadata_cleaned.csv
-
-      - name: Crear new_runs.txt con todos los runs
+      - name: Preparar metadata y lista de runs
         run: |
+          cp metadata_cleaned.csv ~/metadata_cleaned.csv
+
           python3 << 'PYEOF'
-          import pandas as pd, os
-          df = pd.read_csv("metadata_cleaned.csv", dtype=str).fillna("")
-          runs = df["Run"].str.strip().tolist()
-          runs = [r for r in runs if r.startswith(("SRR","ERR","DRR"))]
-          out = os.path.join(os.path.expanduser("~"), "new_runs.txt")
-          with open(out, "w") as f:
-              f.write("\n".join(runs))
-          print(f"Runs a cargar: {len(runs)}")
+          import csv, os
+
+          csv_path = os.path.expanduser("~/metadata_cleaned.csv")
+          out_path = os.path.expanduser("~/new_runs.txt")
+          json_dir = os.path.expanduser("~/json_cache/")
+
+          runs = []
+          with open(csv_path, newline="", encoding="utf-8-sig") as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  run = row.get("Run", "").strip()
+                  if run:
+                      runs.append(run)
+
+          # Solo incluir runs que tienen JSON disponible
+          runs_con_json = [r for r in runs
+                           if os.path.exists(os.path.join(json_dir, f"{r}.results.json"))]
+
+          with open(out_path, "w") as f:
+              f.write("\n".join(runs_con_json) + "\n")
+
+          print(f"Total en CSV     : {len(runs)}")
+          print(f"Con JSON en cache: {len(runs_con_json)}")
+          print(f"Escrito en       : {out_path}")
           PYEOF
 
-      - name: Cargar todos los datos a Neo4j
+      - name: Generar CSVs desde JSONs (calcula qc_pass, MDR, XDR, linaje)
+        run: python pipeline/03_generarcsvs.py
+
+      - name: Cargar todo a Neo4j
         run: python pipeline/04_cargarneo4j.py
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+
+      - name: Resumen
+        if: always()
+        run: |
+          echo "## Recarga Neo4j completada" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          JSON_COUNT=$(ls ~/json_cache/*.results.json 2>/dev/null | wc -l)
+          RUNS_COUNT=$(wc -l < ~/new_runs.txt 2>/dev/null || echo 0)
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| JSONs en cache | $JSON_COUNT |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runs procesados | $RUNS_COUNT |" >> $GITHUB_STEP_SUMMARY
