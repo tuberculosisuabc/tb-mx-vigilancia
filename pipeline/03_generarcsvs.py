@@ -382,6 +382,9 @@ if not df_clusters.empty and not node_sample.empty:
 # Restaurar qc_pass desde el mapa original (sobrevive todos los merges)
 node_sample["qc_pass"] = node_sample["sample_id"].map(qc_pass_map)
 log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
+log(f"  Columnas en node_sample: {list(node_sample.columns)}")
+log(f"  qc_pass_map tiene {len(qc_pass_map)} entradas, ejemplo: {dict(list(qc_pass_map.items())[:2])}")
+log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
 
 # PASO 3: Guardar CSVs
 log("\n3. Guardando CSVs en ~/neo4j_export/...")
