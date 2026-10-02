@@ -31,6 +31,13 @@ st.markdown("""
     &nbsp;&nbsp;• Coordinadora del CIIViGEI, UABC<br>
     &nbsp;&nbsp;• Presidenta de The Union Latinoamérica (2023–2026)<br>
     &nbsp;&nbsp;• Presidenta de RemiTB<br><br>
+    
+    <p style='color:#4a6278;font-size:1rem;line-height:1.9'>
+    <b>Dra. Dora-Luz Flores — Colaboradora Nacional</b><br>
+    &nbsp;&nbsp;• Profesora-Investigadora, Facultad de Ingeniería, Arquitectura y Diseño, UABC <br>
+    &nbsp;&nbsp;• Coordinadora General de Investigación y Posgrado, UABC <br>
+    &nbsp;&nbsp;• Vicepresidenta del Consejo Mexicano de Estudios de Posgrado (COMEPO) <br>
+    &nbsp;&nbsp;• Miembro del Liaison Committee of the ISC Regional Focal Point for the LACR<br><br>
 
     <p style='color:#4a6278;font-size:1rem;line-height:1.9'>
     <b>Dr. Giuseppe Pirrò — Colaborador Internacional</b><br>
