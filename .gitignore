@@ -1,0 +1,20 @@
+﻿# Credenciales
+.streamlit/secrets.toml
+.env
+
+# Datos temporales del pipeline
+workdir/
+json_cache/
+neo4j_export/
+new_runs.txt
+*.log
+failed_samples.csv
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# IDE
+.idea/
+.vscode/
