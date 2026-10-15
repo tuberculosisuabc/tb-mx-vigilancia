@@ -9,7 +9,7 @@
   #7. Add new row for new biosamples on metadata_cleaned.csv
   #8. Saves ~/new_runs.txt with the new  Run IDs to process
 
-import os, sys, time, difflib
+import os, sys, time, difflib, unicodedata
 from io import StringIO
 from pathlib import Path
 import pandas as pd
@@ -38,7 +38,7 @@ STATE_COORDS = {
     "Guerrero":           (17.4392, -100.0000),
     "Hidalgo":            (20.0911,  -98.7624),
     "Jalisco":            (20.6595, -103.3494),
-    "Mexico":             (19.3588,  -99.8237),
+    "Estado de Mexico":   (19.3588,  -99.8237),
     "Michoacan":          (19.5665, -101.7068),
     "Morelos":            (18.6813,  -99.1013),
     "Nayarit":            (21.7514, -104.8455),
@@ -60,15 +60,37 @@ STATE_COORDS = {
 
 def log(msg): print(msg, flush=True)
 
+def normalize(text):
+    """'Nuevo León ' -> 'nuevo leon'"""
+    text = unicodedata.normalize("NFKD", str(text))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(text.lower().split())
+
+# Spellings found in NCBI records that differ from the official state name
+STATE_ALIASES = {
+    "cdmx": "Ciudad de Mexico",
+    "mexico city": "Ciudad de Mexico",
+    "iztapalapa": "Ciudad de Mexico",
+    "edo mx": "Estado de Mexico",
+    "edomx": "Estado de Mexico",
+    "monterrey": "Nuevo Leon",
+    "xalapa": "Veracruz",
+    "veracurz": "Veracruz",
+    "acapulco guerrereo": "Guerrero",
+    "atoyac de alvarez guerrero": "Guerrero",
+}
+STATE_LOOKUP = {normalize(s): s for s in STATE_COORDS} | STATE_ALIASES
+
 def extract_state(geo_loc_name):
-    if not geo_loc_name or pd.isna(geo_loc_name):
+    """'Mexico: Xalapa, Veracruz' -> ('Veracruz', lat, lon).
+    Returns ('', None, None) if no state is given or it isn't recognised."""
+    if pd.isna(geo_loc_name) or ":" not in str(geo_loc_name):
         return "", None, None
-    geo = str(geo_loc_name).replace("Mexico:", "").strip()
-    state_raw = geo.split(",")[0].strip()
-    for key, coords in STATE_COORDS.items():
-        if key.lower() in state_raw.lower() or state_raw.lower() in key.lower():
-            return key, coords[0], coords[1]
-    return state_raw, None, None
+    for part in str(geo_loc_name).split(":", 1)[1].split(","):
+        state = STATE_LOOKUP.get(normalize(part))
+        if state:
+            return state, *STATE_COORDS[state]
+    return "", None, None
 
 def drop_similar_columns(df, threshold=0.8):
     cols, drop = df.columns.tolist(), set()
@@ -114,23 +136,18 @@ res = Entrez.read(h); h.close()
 all_bs_ids = res["IdList"]
 log(f"BioSamples en NCBI: {len(all_bs_ids)}")
 
-  #New biosamples found
-new_bs_ids = [b for b in all_bs_ids if b not in existing_bs]
-log(f"BioSamples nuevos (no en CSV): {len(new_bs_ids)}")
-
-if not new_bs_ids:
-    log("\nSin BioSamples nuevos. Base de datos actualizada.")
-    NEW_RUNS_FILE.write_text("")
-    sys.exit(0)
+# esearch returns numeric UIDs (e.g. 56460836), but the CSV stores accessions
+# (e.g. SAMN56460836). They can't be compared directly, so all records are
+# fetched and new BioSamples are identified by accession inside the loop below.
 
 # STEP 3: efetch XML of new BioSamples
-log(f"\nDescargando metadata XML de {len(new_bs_ids)} BioSamples nuevos...")
+log(f"\nDescargando metadata XML de {len(all_bs_ids)} BioSamples...")
 BATCH = 200
 flat_samples = []
 
-for i in range(0, len(new_bs_ids), BATCH):
-    batch = new_bs_ids[i:i+BATCH]
-    log(f"  Lote {i//BATCH+1}/{-(-len(new_bs_ids)//BATCH)}: {len(batch)} registros...")
+for i in range(0, len(all_bs_ids), BATCH):
+    batch = all_bs_ids[i:i+BATCH]
+    log(f"  Lote {i//BATCH+1}/{-(-len(all_bs_ids)//BATCH)}: {len(batch)} registros...")
     time.sleep(0.4)
 
     h    = Entrez.efetch(db="biosample", id=",".join(batch), retmode="xml")
