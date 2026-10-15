@@ -10,7 +10,7 @@
     #7. Recalculate aggregated counters
     #8. Verification
 
-#Uso: python pipeline/04_cargarneo4j
+#Usage: python pipeline/04_load_neo4j.py
 import os, sys, re
 from datetime import datetime
 from collections import defaultdict
@@ -27,6 +27,7 @@ NEO4J_PASS = os.environ.get("NEO4J_PASSWORD")
 METADATA_CSV     = Path.home() / "metadata_cleaned.csv"
 NEO4J_EXPORT_DIR = Path.home() / "neo4j_export"
 NEW_RUNS_FILE    = Path.home() / "new_runs.txt"
+FAILED_FILE      = Path.home() / "failed_samples.csv"
 LOG_FILE         = Path.home() / "load_neo4j_update.log"
 BATCH_SIZE       = 500
 
@@ -141,7 +142,7 @@ seen_bioprojects = set()
 for _, row in df_meta_new.iterrows():
     run   = row.get("Run", "")
     state = row.get("state", "")
-    bp    = row.get("BioProject_y", "")
+    bp    = row.get("BioProject_y", "") or row.get("BioProject_x", "") or row.get("BioProject", "")
     bs_id = row.get("BioSampleID", "")
     geo   = row.get("geo_loc_name", "")
 
@@ -386,6 +387,12 @@ if sample_tbp_rows:
             r.qc_warnings        = row.qc_warnings,
             r.fail_reasons       = row.fail_reasons,
             r.num_dr_variants    = CASE WHEN row.num_dr_variants <> '' THEN toInteger(row.num_dr_variants) ELSE null END,
+            r.num_other_variants = CASE WHEN row.num_other_variants <> '' THEN toInteger(row.num_other_variants) ELSE null END,
+            r.resistant_drugs    = row.resistant_drugs,
+            r.collection_date    = row.collection_date,
+            r.isolation_source   = row.isolation_source,
+            r.processing_status  = 'ok',
+            r.processing_error   = null,
             r.tb_profiler_version= row.tb_profiler_version,
             r.db_version         = row.db_version
     """, sample_tbp_rows, "SRARun TB-Profiler props")
