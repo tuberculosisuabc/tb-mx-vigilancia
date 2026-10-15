@@ -1,5 +1,9 @@
-streamlit==1.43.2
-plotly==5.24.1
-pandas==2.2.3
-neo4j==5.19.0
-pillow==11.1.0
+# Python libraries used by pipeline/*.py
+biopython
+neo4j
+pandas
+scipy
+numpy
+pyyaml
+
+# In GitHub Actions everything is installed with conda
