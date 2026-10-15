@@ -4,7 +4,7 @@
   #2. Runs TB-Profiler on new SRA Runs
   #3. New JSONs are saved on ~/json_cache/
 
-import subprocess, time, os, json, shutil
+import subprocess, time, os, json, shutil, csv
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -14,6 +14,7 @@ WORKDIR = Path.home() / "workdir"
 JSON_CACHE = Path.home() / "json_cache"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
 LOG_FILE = Path.home() / "run_tbprofiler_update.log"
+FAILED_FILE = Path.home() / "failed_samples.csv"
 
 N_WORKERS = 2
 TIMEOUT_DL = 3600
@@ -158,7 +159,7 @@ def process_sample(run_id):
 if __name__ == "__main__":
 
     if not NEW_RUNS_FILE.exists() or NEW_RUNS_FILE.stat().st_size == 0:
-        log("new_runs.txt vacío o inexistente. Ejecutar primero update_01_fetch_new.py")
+        log("new_runs.txt vacío o inexistente. Ejecutar primero pipeline/01_fetch_ncbi.py")
         exit(0)
 
     pending = [r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()]
@@ -179,7 +180,7 @@ if __name__ == "__main__":
         futures = {executor.submit(process_sample, sid): sid for sid in pending}
         for i, future in enumerate(as_completed(futures), 1):
             run_id, success, msg, mins = future.result()
-            status = "NO" if success else "YES"
+            status = "OK" if success else "FAIL"
             log(f"[{i}/{len(pending)}] {run_id} {status} {mins:.1f} min  {'' if success else msg}")
             if success:
                 ok_count += 1
@@ -196,5 +197,11 @@ if __name__ == "__main__":
         log("Runs fallidos (se marcarán en Neo4j pero no bloquean el pipeline):")
         for rid, err in failed_runs:
             log(f"  {rid}: {err[:100]}")
+    # Save failed runs so 04_load_neo4j.py can record them in Neo4j
+    with open(FAILED_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["run_id", "error"])
+        writer.writerows(failed_runs)
+    log(f"Runs fallidos guardados en  : {FAILED_FILE}")
     log(f"JSONs nuevos guardados en   : {JSON_CACHE}")
     log("=" * 60)
