@@ -64,10 +64,15 @@ def run_batch(sf, query, rows, label):
     log(f"  {label:<42} {inserted:>6} registros")
 
 def parse_year(date_str):
+    """Collection year from an NCBI collection_date ('2019', '2019-05-02').
+    Date ranges such as '2013/2016' return None: the real year is unknown,
+    so these samples are excluded from yearly statistics (no TimePoint)."""
     if not date_str or date_str.lower() in ("not collected", "missing", "na", "n/a", ""):
         return None
-    m = re.search(r"\b(19|20)\d{2}\b", date_str)
-    return int(m.group()) if m else None
+    years = re.findall(r"\b(?:19|20)\d{2}\b", date_str)
+    if len(set(years)) != 1:
+        return None
+    return int(years[0])
 
 LINEAGE_DESC = {
     "lineage1": "Indo-Oceanic (L1)",
@@ -77,10 +82,13 @@ LINEAGE_DESC = {
     "lineage5": "West-African 1 (L5)",
     "lineage6": "West-African 2 (L6)",
     "lineage7": "Ethiopian (L7)",
-    "lineage8": "Clade A1 (L8)",
-    "lineage9": "Clade A2 (L9)",
-    "La1"     : "M. africanum",
-    "La2"     : "M. africanum 2",
+    "lineage8": "Lineage 8 (L8)",
+    "lineage9": "Lineage 9 (L9)",
+    # Animal-adapted MTBC lineages (TB-Profiler naming)
+    "La1"     : "M. bovis (La1, incl. BCG)",
+    "La2"     : "M. caprae (La2)",
+    "La3"     : "M. orygis (La3)",
+    "mixed"   : "Mixed infection (more than one lineage detected)",
     "QC_Failed": "QC Failed — low coverage",
 }
 
@@ -198,8 +206,9 @@ if location_rows:
         UNWIND $rows AS row
         MERGE (l:Location {state: row.state})
         SET l.country = row.country,
-            l.lat     = CASE WHEN row.lat IS NOT NULL THEN toFloat(row.lat) ELSE l.lat END,
-            l.lon     = CASE WHEN row.lon IS NOT NULL THEN toFloat(row.lon) ELSE l.lon END
+            // Keep existing state coordinates; only fill them if missing
+            l.lat     = coalesce(l.lat, toFloat(row.lat)),
+            l.lon     = coalesce(l.lon, toFloat(row.lon))
     """, location_rows, "Location nodes")
 
 if bioproject_rows:
@@ -250,7 +259,7 @@ if not df_tbp.empty:
         sub = row.get("sub_lineage", "")
         sid = row.get("sample_id", "")
         if lin and lin not in ("", "QC_Failed"):
-            top = lin.split(".")[0]
+            top = "mixed" if ";" in lin else lin.split(".")[0]
             lineage_map[lin]["sub_lineages"].add(sub)
             lineage_map[lin]["top_level"] = top
             lineage_map[lin]["count"] += 1
@@ -267,7 +276,7 @@ if not df_tbp.empty:
 
 lineage_rows = []
 for lin, info in lineage_map.items():
-    top = lin.split(".")[0]
+    top = "mixed" if ";" in lin else lin.split(".")[0]
     lineage_rows.append({
         "lineage_id" : lin,
         "top_level"  : top,
@@ -295,7 +304,7 @@ if tp_rows:
 log("\n" + "=" * 60)
 log("PASO 3: Clusters")
 
-cluster_rows_csv = read_csv("transmission_clusters.csv")
+cluster_rows_csv = read_csv("resistance_region_clusters.csv")
 cluster_nodes    = {}
 for r in cluster_rows_csv:
     cid = r.get("cluster_id", "")
@@ -308,11 +317,17 @@ if cluster_rows_csv:  #remove previous clisters to recalculate
     log("  Clusters anteriores eliminados")
     
 if cluster_nodes:
-    cn_rows = [{"cluster_id": k, "size": v} for k, v in cluster_nodes.items()]
+    cluster_info = {r["cluster_id"]: r for r in cluster_rows_csv}
+    cn_rows = [{"cluster_id": k, "size": v,
+                "method": cluster_info[k].get("method", ""),
+                "snp_threshold": cluster_info[k].get("snp_threshold", "")}
+               for k, v in cluster_nodes.items()]
     run_batch(sf, """
         UNWIND $rows AS row
         MERGE (c:Cluster {cluster_id: row.cluster_id})
-        SET c.size = toInteger(row.size)
+        SET c.size          = toInteger(row.size),
+            c.method        = row.method,
+            c.snp_threshold = toInteger(row.snp_threshold)
     """, cn_rows, "Cluster nodes")
 
 in_cluster_rows = [
@@ -381,6 +396,9 @@ if sample_tbp_rows:
             r.is_mdr             = row.is_mdr,
             r.is_xdr             = row.is_xdr,
             r.is_mtb             = row.is_mtb,
+            r.is_rr              = row.is_rr,
+            r.species            = row.species,
+            r.mixed_infection    = row.mixed_infection,
             r.median_depth       = CASE WHEN row.median_depth <> ''    THEN toFloat(row.median_depth)    ELSE null END,
             r.pct_mapped         = CASE WHEN row.pct_mapped <> ''      THEN toFloat(row.pct_mapped)      ELSE null END,
             r.qc_pass            = row.qc_pass,
@@ -510,7 +528,7 @@ log("PASO 7: Recalculando conteos agregados")
 with driver.session() as session:
     session.run("""
         MATCH (l:Lineage)
-        OPTIONAL MATCH (s:SRARun)-[:BELONGS_TO]->(l)
+        OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
         WITH l, count(s) AS cnt
         SET l.sample_count = cnt
     """)
@@ -518,14 +536,19 @@ with driver.session() as session:
 
     session.run("""
         MATCH (t:TimePoint)
-        OPTIONAL MATCH (s:SRARun)-[:DETECTED_IN]->(t)
+        OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:DETECTED_IN]->(t)
         WITH t,
              count(s) AS total,
-             sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr_cnt
+             sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr_cnt,
+             sum(CASE WHEN s.is_rr  = 'Yes' THEN 1 ELSE 0 END) AS rr_cnt
         SET t.sample_count = total,
             t.mdr_count    = mdr_cnt,
             t.mdr_rate     = CASE WHEN total > 0
                              THEN round(toFloat(mdr_cnt)/total*100, 1)
+                             ELSE 0.0 END,
+            t.rr_count     = rr_cnt,
+            t.rr_rate      = CASE WHEN total > 0
+                             THEN round(toFloat(rr_cnt)/total*100, 1)
                              ELSE 0.0 END
     """)
     log("  TimePoint conteos actualizados ✅")
