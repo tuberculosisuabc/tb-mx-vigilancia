@@ -20,6 +20,14 @@ OUTPUT_DIR    = Path.home() / "neo4j_export"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
 SNP_THRESHOLD = 12
 
+# QC thresholds: a sample passes if target median depth >= MIN_DEPTH (x)
+# and reads mapped >= MIN_PCT_MAPPED (%)
+MIN_DEPTH      = 10
+MIN_PCT_MAPPED = 90
+
+# Resistance categories from TB-Profiler drtype (WHO 2021 definitions)
+RR_TYPES  = {"RR-TB", "MDR-TB", "Pre-XDR-TB", "XDR-TB"}   # rifampicin resistant
+
 OUTPUT_DIR.mkdir(exist_ok=True)
 JSON_CACHE.mkdir(exist_ok=True)
 
@@ -63,11 +71,17 @@ if corrupt:
     log(f"Corruptos             : {len(corrupt)}")
 
 # Running summary update
+def passes_qc(data):
+    qc = data.get("qc", {})
+    return (qc.get("target_median_depth", 0) >= MIN_DEPTH
+            and qc.get("percent_reads_mapped", 0) >= MIN_PCT_MAPPED)
+
+
 def build_summary_row(sid, data):
     qc      = data.get("qc", {})
     depth   = qc.get("target_median_depth", 0)
     mapped  = qc.get("percent_reads_mapped", 0)
-    qc_pass = "PASS" if (depth >= 10 and mapped >= 90) else "FAIL"
+    qc_pass = "PASS" if (depth >= MIN_DEPTH and mapped >= MIN_PCT_MAPPED) else "FAIL"
 
     res_drugs = set()
     for v in data.get("dr_variants", []):
@@ -75,22 +89,40 @@ def build_summary_row(sid, data):
             if d.get("drug"):
                 res_drugs.add(d["drug"].lower())
 
-    mdr = "Yes" if {"isoniazid", "rifampicin"}.issubset(res_drugs) else "No"
-    xdr = "Yes" if (mdr == "Yes"
-                    and res_drugs & {"moxifloxacin", "levofloxacin"}
-                    and res_drugs & {"bedaquiline", "linezolid"}) else "No"
+    # Resistance flags are only assigned to genomes that pass QC ("Unknown" otherwise;
+    # not "NA", which pandas reads back as an empty value).
+    # They follow TB-Profiler's drtype, so flags and drtype always agree:
+    #   is_mdr    = resistant to isoniazid AND rifampicin (strict MDR)
+    #   is_rr     = resistant to rifampicin (WHO "MDR/RR-TB" reporting group)
+    #   is_xdr    = drtype XDR-TB (MDR/RR-TB + fluoroquinolone + bedaquiline/linezolid)
+    if qc_pass == "PASS":
+        drtype = data.get("drtype", "Unknown")
+        rr     = "Yes" if drtype in RR_TYPES else "No"
+        mdr    = "Yes" if (rr == "Yes" and "isoniazid" in res_drugs) else "No"
+        xdr    = "Yes" if drtype == "XDR-TB" else "No"
+    else:
+        drtype, rr, mdr, xdr = "Low_coverage", "Unknown", "Unknown", "Unknown"
+        res_drugs = set()
 
     lineage_val = data.get("main_lineage", "") if qc_pass == "PASS" else "QC_Failed"
-    is_mtb      = "No" if (qc_pass == "PASS" and lineage_val.startswith("La")) else "Yes"
+    # Species from TB-Profiler's lineage call, e.g. "M.bovis" for La1 (incl. BCG).
+    # La lineages belong to the M. tuberculosis complex but are not M. tuberculosis.
+    lineage_calls = data.get("lineage") or [{}]
+    family        = lineage_calls[0].get("family", "") if qc_pass == "PASS" else ""
+    is_mtb        = "No" if (qc_pass == "PASS" and lineage_val.startswith("La")) else "Yes"
+    species       = (family if family.startswith("M.") else "M.tuberculosis") if qc_pass == "PASS" else ""
 
     return {
         "sample_id"   : sid,
         "lineage"     : lineage_val or "QC_Failed",
         "sub_lineage" : data.get("sub_lineage", "QC_Failed") if qc_pass == "PASS" else "QC_Failed",
-        "drtype"      : data.get("drtype", "Unknown") if qc_pass == "PASS" else "Low_coverage",
+        "drtype"      : drtype,
+        "is_rr"       : rr,
         "is_mdr"      : mdr,
         "is_xdr"      : xdr,
         "is_mtb"      : is_mtb,
+        "species"     : species,
+        "mixed_infection": "Yes" if ";" in lineage_val else "No",
         "resistant_drugs": "; ".join(sorted(res_drugs)),
         "median_depth": round(depth, 1),
         "pct_mapped"  : round(mapped, 1),
@@ -103,8 +135,8 @@ def build_qc_row(sid, data):
     depth   = qc.get("target_median_depth", 0)
     mapped  = qc.get("percent_reads_mapped", 0)
     reasons = []
-    if depth  < 10: reasons.append(f"low_depth({depth:.1f}x)")
-    if mapped < 90: reasons.append(f"low_mapping({mapped:.1f}%)")
+    if depth  < MIN_DEPTH:      reasons.append(f"low_depth({depth:.1f}x)")
+    if mapped < MIN_PCT_MAPPED: reasons.append(f"low_mapping({mapped:.1f}%)")
     warnings = qc.get("qc_notes", qc.get("notes", []))
     if isinstance(warnings, str):
         warnings = [warnings]
@@ -246,17 +278,25 @@ if not df_mut.empty:
         node_mut["drug"].fillna("")
     ).str.strip("_")
 
-    node_drug = pd.DataFrame({"drug": df_mut["drug"].dropna().unique()})
+    # other_variants have no drug (""), so only real drug names become Drug nodes
+    drug_names = df_mut["drug"].dropna()
+    node_drug  = pd.DataFrame({"drug": drug_names[drug_names != ""].unique()})
+    # WHO 2022 drug classification (Consolidated guidelines, Module 4: Treatment).
+    # First-line drugs for drug-susceptible TB, then WHO groups A/B/C for
+    # MDR/RR-TB regimens. Kanamycin and capreomycin are no longer recommended.
+    # Pretomanid is not part of groups A-C (used in the BPaL/BPaLM regimens).
     drug_class_map = {
-        "isoniazid":"1st_line", "rifampicin":"1st_line",
-        "ethambutol":"1st_line", "pyrazinamide":"1st_line",
-        "streptomycin":"1st_line_injectable",
-        "moxifloxacin":"fluoroquinolone", "levofloxacin":"fluoroquinolone",
-        "bedaquiline":"group_A", "linezolid":"group_A",
-        "pretomanid":"group_A", "clofazimine":"group_A",
-        "delamanid":"group_B",
-        "amikacin":"2nd_line_injectable", "kanamycin":"2nd_line_injectable",
-        "capreomycin":"2nd_line_injectable",
+        "isoniazid": "first_line", "rifampicin": "first_line",
+        "ethambutol": "first_line", "pyrazinamide": "first_line",
+        "levofloxacin": "group_A", "moxifloxacin": "group_A",
+        "bedaquiline": "group_A", "linezolid": "group_A",
+        "clofazimine": "group_B", "cycloserine": "group_B", "terizidone": "group_B",
+        "delamanid": "group_C", "amikacin": "group_C", "streptomycin": "group_C",
+        "ethionamide": "group_C", "prothionamide": "group_C",
+        "para-aminosalicylic_acid": "group_C",
+        "imipenem": "group_C", "meropenem": "group_C",
+        "kanamycin": "not_recommended", "capreomycin": "not_recommended",
+        "pretomanid": "bpal_regimen",
     }
     node_drug["drug_class"] = node_drug["drug"].map(drug_class_map).fillna("other")
 
@@ -279,12 +319,22 @@ else:
 
 
 
-# STEP 3 Recalculate cluster, with all samples
-log("\n2. Recalculando clusters SNP con todos los JSONs...")
+# STEP 3 Recalculate resistance-region similarity groups, with all samples
+#
+# Method note: distances count differences in the variants TB-Profiler reports
+# (dr_variants + other_variants), which only cover the loci in its resistance
+# database (~70 genes), NOT the whole genome. Groups therefore reflect similar
+# resistance-region genotypes and must NOT be interpreted as transmission
+# clusters, which require genome-wide SNP distances.
+# Only genomes that pass QC are included.
+CLUSTER_METHOD = "resistance_loci_snp_distance"
+log("\n2. Recalculando grupos de similitud (regiones de resistencia)...")
 
-#Variants matrix with all data
+#Variants matrix with all QC-passed samples
+qc_pass_ids  = [sid for sid, data in all_data.items() if passes_qc(data)]
 all_mut_rows = []
-for sid, data in all_data.items():
+for sid in qc_pass_ids:
+    data = all_data[sid]
     for var in data.get("dr_variants", []) + data.get("other_variants", []):
         gene   = var.get("gene_name", "")
         change = var.get("nucleotide_change", "") or var.get("protein_change", "")
@@ -355,16 +405,18 @@ if all_mut_rows:
                 "cluster_id"   : cid,
                 "cluster_size" : len(members),
                 "snp_threshold": SNP_THRESHOLD,
+                "method"       : CLUSTER_METHOD,
             })
             clustered.add(sid)
 
-    for sid in all_data:
+    for sid in qc_pass_ids:
         if sid not in clustered:
             cluster_rows.append({
                 "sample_id"    : sid,
                 "cluster_id"   : "singleton",
                 "cluster_size" : 1,
                 "snp_threshold": SNP_THRESHOLD,
+                "method"       : CLUSTER_METHOD,
             })
 
     non_singleton = [r for r in cluster_rows if r["cluster_id"] != "singleton"]
@@ -373,10 +425,11 @@ if all_mut_rows:
     log(f"  Singletons          : {len(cluster_rows) - len(non_singleton)}")
 else:
     log("  Sin variantes disponibles — todas marcadas como singleton")
-    for sid in all_data:
+    for sid in qc_pass_ids:
         cluster_rows.append({
             "sample_id": sid, "cluster_id": "singleton",
             "cluster_size": 1, "snp_threshold": SNP_THRESHOLD,
+            "method": CLUSTER_METHOD,
         })
 
 df_clusters = pd.DataFrame(cluster_rows)
@@ -411,7 +464,7 @@ files = {
     "neo4j_rel_has_mutation.csv"    : rel_has_mut,
     "neo4j_rel_resistant_to.csv"    : rel_res,
     "mutation_details.csv"          : df_mut,
-    "transmission_clusters.csv"     : df_clusters,
+    "resistance_region_clusters.csv"     : df_clusters,
     "pairwise_snp_distances.csv"    : df_pairwise,
     "neo4j_rel_linked_to.csv"       : df_linked,
 }
