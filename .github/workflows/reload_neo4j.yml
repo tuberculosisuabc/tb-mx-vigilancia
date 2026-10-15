@@ -67,10 +67,10 @@ jobs:
           PYEOF
 
       - name: Generar CSVs desde JSONs (calcula qc_pass, MDR, XDR, linaje)
-        run: python pipeline/03_generarcsvs.py
+        run: python pipeline/03_build_graph_csvs.py
 
       - name: Cargar todo a Neo4j
-        run: python pipeline/04_cargarneo4j.py
+        run: python pipeline/04_load_neo4j.py
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
