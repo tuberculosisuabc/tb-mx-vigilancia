@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
-
-#Correr TB-Profiler
-  #1. Lee ~/new_runs.txt
-  #2. Corre TB-Profiler en runs nuevos
-  #3. JSONs nuevos se guardan en ~/json_cache/
-
-#Uso: python pipeline/01_corrertbprofiler.py
+#Runs bioinformatic pipeline TB-Profiler to process available SRA runs
+  #1. Reads ~/new_runs.txt
+  #2. Runs TB-Profiler on new SRA Runs
+  #3. New JSONs are saved on ~/json_cache/
 
 import subprocess, time, os, json, shutil
 from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-# CONFIGURACIÓN
+# Configuration
 WORKDIR = Path.home() / "workdir"
 JSON_CACHE = Path.home() / "json_cache"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
@@ -72,7 +69,7 @@ def process_sample(run_id):
         shutil.rmtree(wdir, ignore_errors=True)
         os.makedirs(wdir, exist_ok=True)
 
-        #Descarga prefetch
+        #Downloads prefetch
         shutil.rmtree(sra_dir, ignore_errors=True)
         r = subprocess.run(
             ["prefetch", "--max-size", "50G",
@@ -100,7 +97,7 @@ def process_sample(run_id):
                 cleanup()
                 return run_id, False, f"Download failed: {r.stderr[:200]}", elapsed()
 
-        # Detectar single vs paired
+        # Detect single vs paired
         r1_se = os.path.join(wdir, f"{run_id}.fastq.gz")
         if os.path.exists(r1_se) and not os.path.exists(r1):
             os.rename(r1_se, r1)
@@ -113,7 +110,7 @@ def process_sample(run_id):
         results_dir = os.path.join(wdir, "results")
         os.makedirs(results_dir, exist_ok=True)
 
-        #2. CORRER TB-Profiler
+        #2. RUNS TB-Profiler
         cmd = ["tb-profiler", "profile",
                "-1", r1,
                "-p", run_id, "-t", "4",
@@ -131,7 +128,7 @@ def process_sample(run_id):
             cleanup()
             return run_id, False, f"TB-Profiler: {err}", elapsed()
 
-        # Validar JSON
+        # Validate JSON
         try:
             with open(json_src) as jf:
                 d = json.load(jf)
@@ -142,7 +139,7 @@ def process_sample(run_id):
             cleanup()
             return run_id, False, f"JSON inválido: {e}", elapsed()
 
-        # 3. GUARDAR JSONs NUEVOS
+        # 3. Save new JSONs 
         dst = JSON_CACHE / f"{run_id}.results.json"
         shutil.copy2(json_src, dst)
 
