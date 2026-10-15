@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-#Generar CSV
-  #1. Lee JSONs de los nuevos runs
-  #2. Generar nodos y relaciones nuevas
-  #3. Resultados en neo4j_export
-
-#Uso: python pipeline/03_generarcsvs
+#Generates CSVs to import on Neo4j
+  #1. Reads JSONs of the new SRA Runs
+  #2. Generates new nodes and relantionships 
+  #3. Recalculate clusters
+  #4. Saves results on neo4j_export
 
 import os, json, glob, subprocess
 import pandas as pd
@@ -14,7 +13,7 @@ from scipy.spatial.distance import squareform
 from datetime import datetime
 from pathlib import Path
 
-# Rutas
+# Routes
 METADATA_CSV  = Path.home() / "metadata_cleaned.csv"
 JSON_CACHE    = Path.home() / "json_cache"
 OUTPUT_DIR    = Path.home() / "neo4j_export"
@@ -29,7 +28,7 @@ def log(msg):
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
-# 1. Leer runs nuevos
+# STEP 1: Read new runs
 if not NEW_RUNS_FILE.exists() or NEW_RUNS_FILE.stat().st_size == 0:
     log("new_runs.txt vacío. Sin muestras nuevas que procesar.")
     exit(0)
@@ -37,13 +36,13 @@ if not NEW_RUNS_FILE.exists() or NEW_RUNS_FILE.stat().st_size == 0:
 new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
 log(f"Runs nuevos a procesar: {len(new_runs)}")
 
-# Cargar TODOS los JSONs del cache (histórico y nuevos) necesarios para actualizar clusters/relaciones/nodos
+# Load all JSONs (historic and new) needed to update cluester/relantionships/nodes
 log("Cargando JSONs del cache local...")
 all_json_files = list(JSON_CACHE.glob("*.results.json"))
 log(f"Total JSONs en cache: {len(all_json_files)}")
 
-all_data  = {}   # todos para clustering
-new_data  = {}   # solo nuevos para nodos/relaciones
+all_data  = {}   # use for clustering
+new_data  = {}   # for new nodes/relantionships
 
 corrupt = []
 for jf in all_json_files:
@@ -63,7 +62,7 @@ log(f"JSONs nuevos válidos  : {len(new_data)}")
 if corrupt:
     log(f"Corruptos             : {len(corrupt)}")
 
-# Construir fila de resumen para un sample
+# Running summary update
 def build_summary_row(sid, data):
     qc      = data.get("qc", {})
     depth   = qc.get("target_median_depth", 0)
@@ -181,7 +180,7 @@ def build_mut_rows(sid, data):
 
 
 
-# PASO 1: Nodos y relaciones de los runs NUEVOS
+# STEP 2: Create new nodes and relantionships
 log("\n1. Generando nodos/relaciones para runs nuevos...")
 
 summary_rows = [build_summary_row(sid, d) for sid, d in new_data.items()]
@@ -197,13 +196,10 @@ df_mut     = pd.DataFrame(mut_rows) if mut_rows else pd.DataFrame()
 log(f"  Resumen muestras nuevas : {len(df_summary)}")
 log(f"  Mutaciones nuevas       : {len(df_mut)}")
 
-# Guardar qc_pass ANTES de cualquier merge para no perderla
+# Saves qc_pass 
 qc_pass_map = df_summary.set_index("sample_id")["qc_pass"].to_dict() if not df_summary.empty else {}
 
-# Guardar qc_pass ANTES del merge para no perderla por conflicto de columnas
-qc_pass_map = df_summary.set_index("sample_id")["qc_pass"].to_dict() if not df_summary.empty else {}
-
-# Nodos Sample (merge summary + qc) — qc_pass NO va en df_qc para evitar _x/_y
+# Nodos Sample (merge summary + qc), not qc_pass=NO 
 if not df_summary.empty and not df_qc.empty:
     node_sample = df_summary.merge(
         df_qc[["sample_id", "fail_reasons", "num_dr_variants",
@@ -213,12 +209,12 @@ if not df_summary.empty and not df_qc.empty:
 else:
     node_sample = df_summary.copy()
 
-# Restaurar qc_pass (sobrevive todos los merges)
+# Restore qc_pass 
 node_sample["qc_pass"] = node_sample["sample_id"].map(qc_pass_map)
 log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
 
 
-# Integrar metadata geográfica
+# Integrate gepgraphic metadata 
 try:
     df_meta = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
     df_meta = (df_meta
@@ -229,14 +225,14 @@ try:
     keep = [c for c in ["Run","state","lat","lon","collection_date",
                          "BioProject_y","isolation_source"] if c in df_meta.columns]
     df_meta2 = df_meta[keep].rename(columns={"Run": "sample_id"})
-    # Filtrar solo los nuevos
+    # Filter only the new 
     df_meta2 = df_meta2[df_meta2["sample_id"].isin(new_runs)]
     node_sample = node_sample.merge(df_meta2, on="sample_id", how="left")
     log(f"  Metadata integrada para {len(df_meta2)} runs nuevos")
 except Exception as e:
     log(f"  Advertencia integrando metadata: {e}")
 
-# Nodos Mutation y Drug (solo nuevos)
+# Drug and Mutation Nodes
 if not df_mut.empty:
     node_mut = df_mut[["gene","nt_change","aa_change","variant_type",
                         "genome_pos","drug","confidence","who_confidence",
@@ -279,10 +275,10 @@ else:
 
 
 
-# PASO 2: Recalcular clusters con TODOS los JSONs
+# STEP 3 Recalculate cluster, with all samples
 log("\n2. Recalculando clusters SNP con todos los JSONs...")
 
-# Construir matriz de variantes con todos los datos
+#Variants matrix with all data
 all_mut_rows = []
 for sid, data in all_data.items():
     for var in data.get("dr_variants", []) + data.get("other_variants", []):
@@ -313,7 +309,7 @@ if all_mut_rows:
         dist_matrix[i, i+1:] = diff
         dist_matrix[i+1:, i] = diff
 
-    # Guardar pares cercanos (solo los nuevos como sample_a para eficiencia)
+    # Saves near pairs
     new_indices = [i for i, s in enumerate(samples_in_matrix) if s in new_runs]
     for i in new_indices:
         for j in range(n):
@@ -377,7 +373,7 @@ else:
 df_clusters = pd.DataFrame(cluster_rows)
 df_pairwise = pd.DataFrame(pairwise_rows)
 
-# Agregar cluster a node_sample de los nuevos
+#Add cluster to samples node
 if not df_clusters.empty and not node_sample.empty:
     df_clust_new = df_clusters[df_clusters["sample_id"].isin(new_runs)]
     node_sample = node_sample.merge(
@@ -387,17 +383,16 @@ if not df_clusters.empty and not node_sample.empty:
 
 
 
-# Restaurar qc_pass desde el mapa original (sobrevive todos los merges)
+# Restore qc_pass from orginal
 node_sample["qc_pass"] = node_sample["sample_id"].map(qc_pass_map)
 log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
 log(f"  Columnas en node_sample: {list(node_sample.columns)}")
 log(f"  qc_pass_map tiene {len(qc_pass_map)} entradas, ejemplo: {dict(list(qc_pass_map.items())[:2])}")
 log(f"  qc_pass valores únicos: {node_sample['qc_pass'].value_counts().to_dict()}")
 
-# PASO 3: Guardar CSVs
+# STEP 4: Save CSVs
 log("\n3. Guardando CSVs en ~/neo4j_export/...")
 
-# Se guardan los archivos con datos de los runs nuevos
 files = {
     "neo4j_nodes_sample.csv"        : node_sample,
     "neo4j_nodes_mutation.csv"      : node_mut,
@@ -405,7 +400,6 @@ files = {
     "neo4j_rel_has_mutation.csv"    : rel_has_mut,
     "neo4j_rel_resistant_to.csv"    : rel_res,
     "mutation_details.csv"          : df_mut,
-    # Clusters completos (recalculados con todos los datos)
     "transmission_clusters.csv"     : df_clusters,
     "pairwise_snp_distances.csv"    : df_pairwise,
 }
