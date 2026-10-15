@@ -9,6 +9,8 @@ jobs:
   pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 340      # 5h 40min (suficiente para ~30 muestras nuevas) 
+    permissions:
+      contents: write         # crear el release y guardar metadata_cleaned.csv en el repo
 
 #1. INSTALAR EN GITHUB PROGRAMAS/PAQUETES NECESARIOS PARA EJECUCIÓN
     steps:  
@@ -79,6 +81,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 #3. BUSCAR NUEVOS RUNS, COMPARAR RESULTADOS DE FETCH ACTUAL CON INICIAL
+  # Los scripts leen y escriben ~/metadata_cleaned.csv; se copia la versión del repo
+      - name: Copiar metadata_cleaned.csv al directorio de trabajo
+        run: cp metadata_cleaned.csv ~/metadata_cleaned.csv
+        
 #3.1 Identificar nuevos runs 
       - name: "Paso 1: Identificar runs nuevos en metadata_cleaned.csv"
         run: python pipeline/update_01_fetch_new.py
@@ -120,6 +126,18 @@ jobs:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+          
+   # 3.5: Guardar el CSV actualizado en el repo (solo si Neo4j se cargó bien)
+      - name: Guardar metadata_cleaned.csv actualizado
+        if: steps.check.outputs.has_new == 'true'
+        run: |
+          cp ~/metadata_cleaned.csv metadata_cleaned.csv
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add metadata_cleaned.csv
+          git commit -m "Update metadata_cleaned.csv (${{ steps.check.outputs.count }} new runs)" || echo "Sin cambios en el CSV"
+          git pull --rebase
+          git push
 
 # 4. EMPACAR Y PUBLICAR NUEVO RELEASE CON LOS DATOS ACTUALIZADOS
       - name: Empacar JSONs actualizados
