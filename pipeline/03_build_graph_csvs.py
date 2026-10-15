@@ -91,6 +91,7 @@ def build_summary_row(sid, data):
         "is_mdr"      : mdr,
         "is_xdr"      : xdr,
         "is_mtb"      : is_mtb,
+        "resistant_drugs": "; ".join(sorted(res_drugs)),
         "median_depth": round(depth, 1),
         "pct_mapped"  : round(mapped, 1),
         "qc_pass"     : qc_pass,
@@ -237,9 +238,11 @@ if not df_mut.empty:
     node_mut = df_mut[["gene","nt_change","aa_change","variant_type",
                         "genome_pos","drug","confidence","who_confidence",
                         "variant_class"]].drop_duplicates()
+    # ID uses nt_change: aa_change is empty for promoter/non-coding variants,
+    # which would make different variants in the same gene share one ID
     node_mut["mutation_id"] = (
         node_mut["gene"].fillna("") + "_" +
-        node_mut["aa_change"].fillna("") + "_" +
+        node_mut["nt_change"].fillna("") + "_" +
         node_mut["drug"].fillna("")
     ).str.strip("_")
 
@@ -258,15 +261,16 @@ if not df_mut.empty:
     node_drug["drug_class"] = node_drug["drug"].map(drug_class_map).fillna("other")
 
     rel_has_mut = df_mut[df_mut["variant_class"]=="dr_variant"][
-        ["sample_id","gene","aa_change","drug","allele_freq","variant_depth","variant_class"]
+        ["sample_id","gene","nt_change","aa_change","drug","allele_freq","variant_depth","variant_class"]
     ].copy()
     rel_has_mut["mutation_id"] = (
         rel_has_mut["gene"].fillna("") + "_" +
-        rel_has_mut["aa_change"].fillna("") + "_" +
+        rel_has_mut["nt_change"].fillna("") + "_" +
         rel_has_mut["drug"].fillna("")
     ).str.strip("_")
 
-    rel_res = df_mut[["sample_id","drug","confidence","who_confidence"]].drop_duplicates()
+    rel_res = (df_mut[df_mut["drug"] != ""]
+               [["sample_id","drug","confidence","who_confidence"]].drop_duplicates())
 else:
     node_mut    = pd.DataFrame()
     node_drug   = pd.DataFrame()
@@ -311,15 +315,20 @@ if all_mut_rows:
 
     # Saves near pairs
     new_indices = [i for i, s in enumerate(samples_in_matrix) if s in new_runs]
+    seen_pairs = set()
     for i in new_indices:
         for j in range(n):
             if i == j:
                 continue
+            a, b = sorted((samples_in_matrix[i], samples_in_matrix[j]))
+            if (a, b) in seen_pairs:          # new-new pairs would appear twice
+                continue
+            seen_pairs.add((a, b))
             d = int(dist_matrix[i, j])
             if d <= SNP_THRESHOLD * 5:
                 pairwise_rows.append({
-                    "sample_a": samples_in_matrix[i],
-                    "sample_b": samples_in_matrix[j],
+                    "sample_a": a,
+                    "sample_b": b,
                     "snp_dist": d,
                     "linked"  : "Yes" if d <= SNP_THRESHOLD else "No",
                 })
@@ -334,12 +343,12 @@ if all_mut_rows:
         label_map.setdefault(lbl, []).append(sid)
 
     clustered = set()
-    cid_counter = 1
     for lbl, members in label_map.items():
         if len(members) == 1:
             continue
-        cid = f"C{cid_counter:04d}"
-        cid_counter += 1
+        # Cluster ID = first member run ID in alphabetical order. Unlike a counter
+        # (C0001, C0002...), it stays the same between runs unless the cluster changes.
+        cid = f"CL_{min(members)}"
         for sid in members:
             cluster_rows.append({
                 "sample_id"    : sid,
@@ -372,6 +381,8 @@ else:
 
 df_clusters = pd.DataFrame(cluster_rows)
 df_pairwise = pd.DataFrame(pairwise_rows)
+df_linked   = (df_pairwise[df_pairwise["linked"] == "Yes"][["sample_a", "sample_b", "snp_dist"]]
+               if not df_pairwise.empty else pd.DataFrame())
 
 #Add cluster to samples node
 if not df_clusters.empty and not node_sample.empty:
@@ -402,6 +413,7 @@ files = {
     "mutation_details.csv"          : df_mut,
     "transmission_clusters.csv"     : df_clusters,
     "pairwise_snp_distances.csv"    : df_pairwise,
+    "neo4j_rel_linked_to.csv"       : df_linked,
 }
 
 for fname, df in files.items():
