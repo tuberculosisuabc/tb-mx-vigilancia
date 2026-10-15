@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#Implemeted on website's pipeline (pipeline/01_fecth_ncbi.py)
 #Fetch available biosamples in NCBI
   #1. Load original run
   #2. esearch on BioSample
