@@ -22,6 +22,12 @@ TIMEOUT_FQ = 1800
 TIMEOUT_PROF = 10800
 MIN_DISK_GB = 5
 
+# All samples must be profiled with the same TB-Profiler and tbdb versions as the
+# historical results (June 2025 run), otherwise resistance calls are not comparable.
+# Change these only when ALL samples are re-processed with the new versions.
+EXPECTED_TBPROFILER_VERSION = "6.6.6"
+EXPECTED_DB_COMMIT          = "0a909094"   # tbdb commit, 5 Aug 2025
+
 WORKDIR.mkdir(exist_ok=True)
 JSON_CACHE.mkdir(exist_ok=True)
 
@@ -136,6 +142,15 @@ def process_sample(run_id):
             if "qc" not in d:
                 cleanup()
                 return run_id, False, "JSON sin campo qc", elapsed()
+            pipeline_info = d.get("pipeline", {})
+            version   = pipeline_info.get("software_version", "")
+            db_commit = (pipeline_info.get("db_version") or {}).get("commit", "")
+            if version != EXPECTED_TBPROFILER_VERSION or not db_commit.startswith(EXPECTED_DB_COMMIT):
+                cleanup()
+                return (run_id, False,
+                        f"Version mismatch: TB-Profiler {version}, tbdb {db_commit} "
+                        f"(expected {EXPECTED_TBPROFILER_VERSION}, {EXPECTED_DB_COMMIT})",
+                        elapsed())
         except Exception as e:
             cleanup()
             return run_id, False, f"JSON inválido: {e}", elapsed()
