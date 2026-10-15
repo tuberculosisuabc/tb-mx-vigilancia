@@ -46,7 +46,7 @@ jobs:
           git clone https://github.com/jodyphelan/tbdb.git /tmp/tbdb
           cd /tmp/tbdb
           git checkout 0a909094
-          tb-profiler create_db --prefix tbdb --load
+          tb-profiler create_db --prefix tbdb --force
 
 #2. RESTAURAR JSONS HISTORICOS DESDE GITHUB RELEASE (JSONs de la primera corrida JUN 2025)
       - name: Restaurar JSONs históricos
