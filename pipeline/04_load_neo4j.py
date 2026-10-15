@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 
-#Cargar CSVs de resultados a Neo4j
+#Load resulting CSVs to Neo4j
+    #1. metadata nodes (Location, BioProject, BioSample, Host)
+    #2. Lineage and TimePoint
+    #3. Clusters
+    #4. Metadata relantionships
+    #5. Properties of TB-Profiler into SRARun
+    #6. Relantionships from TB-Profiler
+    #7. Recalculate aggregated counters
+    #8. Verification
+
 #Uso: python pipeline/04_cargarneo4j
 import os, sys, re
 from datetime import datetime
@@ -9,12 +18,12 @@ from pathlib import Path
 import pandas as pd
 from neo4j import GraphDatabase, exceptions as neo4j_exc
 
-# Credenciales de entorno de Neo4j
+# Neo4j Credential
 NEO4J_URI  = os.environ.get("NEO4J_URI")
 NEO4J_USER = os.environ.get("NEO4J_USER") or os.environ.get("NEO4J_USERNAME")
 NEO4J_PASS = os.environ.get("NEO4J_PASSWORD")
 
-# Rutas
+# Routes
 METADATA_CSV     = Path.home() / "metadata_cleaned.csv"
 NEO4J_EXPORT_DIR = Path.home() / "neo4j_export"
 NEW_RUNS_FILE    = Path.home() / "new_runs.txt"
@@ -74,7 +83,7 @@ LINEAGE_DESC = {
     "QC_Failed": "QC Failed — low coverage",
 }
 
-# Conectar a Neo4J
+#Connect to Neo4J
 log("=" * 60)
 log("CARGA INCREMENTAL A NEO4J")
 log(f"URI: {NEO4J_URI}")
@@ -89,13 +98,13 @@ except Exception as e:
 
 sf = driver.session  # session factory
 
-# Leer runs nuevos
+# Read new runs
 new_runs = set()
 if NEW_RUNS_FILE.exists():
     new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
 log(f"Runs nuevos a cargar: {len(new_runs)}")
 
-# Cargar metadata
+# Load metadata
 log("\nCargando metadata CSV...")
 df_meta_all = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
 df_meta = (df_meta_all[df_meta_all["Run"] != ""].copy()
@@ -105,7 +114,7 @@ df_meta = (df_meta_all[df_meta_all["Run"] != ""].copy()
            .drop(columns="_c")
            .reset_index(drop=True))
 
-# Filtrar solo los nuevos
+# Filter only new
 df_meta_new = df_meta[df_meta["Run"].isin(new_runs)].copy()
 log(f"  Runs nuevos en metadata: {len(df_meta_new)}")
 
@@ -117,7 +126,7 @@ df_tbp = pd.DataFrame(sample_tbp_rows) if sample_tbp_rows else pd.DataFrame()
 date_lookup = (df_meta.set_index("Run")["collection_date"].fillna("").to_dict()
                if "collection_date" in df_meta.columns else {})
 
-# PASO 1: Nodos de metadata (Location, BioProject, BioSample, Host)
+# STEP 1: metadata nodes (Location, BioProject, BioSample, Host)
 log("\n" + "=" * 60)
 log("PASO 1: Nodos de metadata")
 
@@ -226,7 +235,7 @@ if srarun_base:
             s.has_data = CASE WHEN row.spots <> '0' THEN 'Yes' ELSE 'No' END
     """, srarun_base, "SRARun base nodes")
 
-#PASO 2: Lineage y TimePoint
+#STEP 2: Lineage and TimePoint
 log("\n" + "=" * 60)
 log("PASO 2: Lineage y TimePoint")
 
@@ -281,7 +290,7 @@ if tp_rows:
         SET t.year = toInteger(row.year)
     """, tp_rows, "TimePoint nodes")
 
-#PASO 3: Clusters
+#STEP 3: Clusters
 log("\n" + "=" * 60)
 log("PASO 3: Clusters")
 
@@ -292,6 +301,11 @@ for r in cluster_rows_csv:
     if cid and cid != "singleton":
         cluster_nodes[cid] = r.get("cluster_size", "1")
 
+if cluster_rows_csv:  #remove previous clisters to recalculate
+    with driver.session() as session:
+        session.run("MATCH (c:Cluster) DETACH DELETE c")
+    log("  Clusters anteriores eliminados")
+    
 if cluster_nodes:
     cn_rows = [{"cluster_id": k, "size": v} for k, v in cluster_nodes.items()]
     run_batch(sf, """
@@ -306,7 +320,7 @@ in_cluster_rows = [
     if r.get("cluster_id", "") != "singleton"
 ]
 
-#PASO 4: Relaciones de metadata
+#STEP 4: Metadata relantionships
 log("\n" + "=" * 60)
 log("PASO 4: Relaciones de metadata")
 
@@ -352,7 +366,7 @@ if has_bp:
         MERGE (r)-[:PART_OF]->(p)
     """, has_bp, "PART_OF rels")
 
-# PASO 5: Propiedades TB-Profiler en SRARun
+# STEP 5: Properties of TB-Profiler into SRARun
 log("\n" + "=" * 60)
 log("PASO 5: Propiedades TB-Profiler")
 
@@ -376,7 +390,17 @@ if sample_tbp_rows:
             r.db_version         = row.db_version
     """, sample_tbp_rows, "SRARun TB-Profiler props")
 
-#PASO 6: Relaciones TB-Profiler
+if FAILED_FILE.exists():
+    failed_rows = pd.read_csv(FAILED_FILE, dtype=str).fillna("").to_dict("records")
+    if failed_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (r:SRARun {run_id: row.run_id})
+            SET r.processing_status = 'failed',
+                r.processing_error  = row.error
+        """, failed_rows, "SRARun failed runs")
+
+#STEP 6: Relantionships from TB-Profiler
 log("\n" + "=" * 60)
 log("PASO 6: Relaciones TB-Profiler")
 
@@ -472,7 +496,7 @@ if linked_rows:
         SET rel.snp_dist = CASE WHEN row.snp_dist <> '' THEN toInteger(row.snp_dist) ELSE null END
     """, linked_rows, "LINKED_TO rels")
 
-# PASO 7: Recalcular conteos agregados
+# STEP 7: Recalculate aggregated counters
 log("\n" + "=" * 60)
 log("PASO 7: Recalculando conteos agregados")
 
@@ -507,7 +531,7 @@ with driver.session() as session:
     """)
     log("  Cluster.size actualizado ")
 
-# PASO 8: Verificación final
+# STEP 8: Verification
 log("\n" + "=" * 60)
 log("PASO 8: Conteos en Neo4j tras la actualización")
 
