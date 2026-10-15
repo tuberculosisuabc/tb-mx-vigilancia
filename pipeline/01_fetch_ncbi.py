@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-
-#Busqueda de muestras en NCBI
-  #1. esearch en BioSample
-  #2. efetch XML de BioSamples nuevos
-  #3. esearch + efetch runinfo SRA
-  #4. Merge BioSample + SRA
-  #5. Geocodifica estados
-  #6. Agrega filas nuevas a metadata_cleaned.csv
-  #7. Guarda ~/new_runs.txt con los Run IDs a procesar
-
-#Uso: python pipeline/01_buscador.py
+#Implemeted on website's pipeline (pipeline/01_fecth_ncbi.py)
+#Fetch available biosamples in NCBI
+  #1. Load original run
+  #2. esearch on BioSample
+  #3. efetch XML of new BioSamples
+  #4. esearch + efetch runinfo SRA
+  #5. Merge BioSample + SRA
+  #6. Looks up states, cleans it 
+  #7. Add new row for new biosamples on metadata_cleaned.csv
+  #8. Saves ~/new_runs.txt with the new  Run IDs to process
 
 import os, sys, time, difflib
 from io import StringIO
@@ -18,13 +17,13 @@ import pandas as pd
 import xml.etree.ElementTree as ET
 from Bio import Entrez
 
-# Configuracion
+# Configuration
 Entrez.email = "daniela.santana@uabc.edu.mx"
 METADATA_CSV  = Path.home() / "metadata_cleaned.csv"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
 RETMAX        = 2000
 
-# Mapa coordenadas por estado
+# Map coordinates for cleaning location (state) data
 STATE_COORDS = {
     "Aguascalientes":     (21.8818, -102.2916),
     "Baja California":    (30.8406, -115.2838),
@@ -87,7 +86,7 @@ def drop_similar_columns(df, threshold=0.8):
                     drop.add(c1 if s1.isna().sum() >= s2.isna().sum() else c2)
     return df.drop(columns=list(drop))
 
-# PASO 1: Cargar metadata existente
+# STEP 1: Load original run results
 log("="*60)
 log("TB-MX: Busqueda en NCBI")
 log("="*60)
@@ -104,7 +103,7 @@ if METADATA_CSV.exists():
 else:
     log("Sin CSV existente (se creara desde cero)")
 
-# PASO 2: esearch BioSample
+# STEP 2: esearch BioSample
 log("\nBuscando en BioSample...")
 QUERY = (
     '"Mycobacterium tuberculosis"[Organism] '
@@ -116,7 +115,7 @@ res = Entrez.read(h); h.close()
 all_bs_ids = res["IdList"]
 log(f"BioSamples en NCBI: {len(all_bs_ids)}")
 
-# Solo los nuevos
+  #New biosamples found
 new_bs_ids = [b for b in all_bs_ids if b not in existing_bs]
 log(f"BioSamples nuevos (no en CSV): {len(new_bs_ids)}")
 
@@ -125,7 +124,7 @@ if not new_bs_ids:
     NEW_RUNS_FILE.write_text("")
     sys.exit(0)
 
-# PASO 3: efetch XML de BioSamples nuevos
+# STEP 3: efetch XML of new BioSamples
 log(f"\nDescargando metadata XML de {len(new_bs_ids)} BioSamples nuevos...")
 BATCH = 200
 flat_samples = []
@@ -139,42 +138,49 @@ for i in range(0, len(new_bs_ids), BATCH):
     root = ET.fromstring(h.read()); h.close()
 
     for bs in root.findall(".//BioSample"):
-        s = {
-            "BioSampleID":      bs.attrib.get("accession"),
-            "publication_date": bs.attrib.get("publication_date"),
-            "submission_date":  bs.attrib.get("submission_date"),
-        }
-        st = bs.find(".//Status")
-        if st is not None: s["status"] = st.attrib.get("status")
+      if bs.attrib.get("accession") in existing_bs:
+        continue #already in metadata_cleaned.csv
+      s = {
+          "BioSampleID":      bs.attrib.get("accession"),
+          "publication_date": bs.attrib.get("publication_date"),
+          "submission_date":  bs.attrib.get("submission_date"),
+      }
+      st = bs.find(".//Status")
+      if st is not None: s["status"] = st.attrib.get("status")
 
-        sra_ids = [t.text for t in bs.findall(".//Id") if t.attrib.get("db")=="SRA"]
-        s["SRA_IDs"] = ", ".join(sra_ids) if sra_ids else None
+      sra_ids = [t.text for t in bs.findall(".//Id") if t.attrib.get("db")=="SRA"]
+      s["SRA_IDs"] = ", ".join(sra_ids) if sra_ids else None
 
-        bps = [l.attrib.get("label") for l in bs.findall(".//Link")
-               if l.attrib.get("target")=="bioproject"]
-        s["BioProject"] = ", ".join(bps) if bps else None
+      bps = [l.attrib.get("label") for l in bs.findall(".//Link")
+             if l.attrib.get("target")=="bioproject"]
+      s["BioProject"] = ", ".join(bps) if bps else None
 
-        cn = bs.find(".//Owner/Contacts/Contact/Name")
-        if cn is not None:
-            s["Submitter"] = " ".join([cn.findtext("First",""),
-                                        cn.findtext("Middle",""),
-                                        cn.findtext("Last","")]).strip()
-        ow = bs.find(".//Owner/Name")
-        if ow is not None: s["Owner"] = ow.text
+      cn = bs.find(".//Owner/Contacts/Contact/Name")
+      if cn is not None:
+          s["Submitter"] = " ".join([cn.findtext("First",""),
+                                      cn.findtext("Middle",""),
+                                      cn.findtext("Last","")]).strip()
+      ow = bs.find(".//Owner/Name")
+      if ow is not None: s["Owner"] = ow.text
 
-        attrs = {}
-        for a in bs.findall(".//Attribute"):
-            k = a.attrib.get("attribute_name") or a.attrib.get("harmonized_name") or "unknown"
-            v = a.text
-            attrs[k] = (attrs[k]+"; "+v) if k in attrs else v
-
-        s.update(attrs)
-        flat_samples.append(s)
+      attrs = {}
+      for a in bs.findall(".//Attribute"):
+          k = a.attrib.get("attribute_name") or a.attrib.get("harmonized_name") or "unknown"
+          v = a.text
+          attrs[k] = (attrs[k]+"; "+v) if k in attrs else v
+      
+      s.update(attrs)
+      flat_samples.append(s)
 
 df_bs_new = pd.DataFrame(flat_samples)
-log(f"  BioSamples parseados: {len(df_bs_new)}")
+log(f"  BioSamples nuevos: {len(df_bs_new)}")
 
-# PASO 4: esearch + efetch SRA runinfo
+if df_bs_new.empty:
+    log("\nSin BioSamples nuevos. Base de datos actualizada.")
+    NEW_RUNS_FILE.write_text("")
+    sys.exit(0)
+  
+#STEP 4: esearch + efetch SRA runinfo
 log(f"\nBuscando runs SRA para los nuevos BioSamples...")
 accessions  = df_bs_new["BioSampleID"].dropna().tolist()
 search_term = " OR ".join([f'"{a}"[BioSample]' for a in accessions])
@@ -189,12 +195,12 @@ if not sra_ids:
     NEW_RUNS_FILE.write_text("")
     sys.exit(0)
 
-h          = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
+h = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
 df_sra_new = pd.read_csv(StringIO(h.read().decode("utf-8"))); h.close()
 log(f"  Runs SRA descargados: {len(df_sra_new)}")
 
-# PASO 5: Merge datos
-log("\nMerging BioSample + SRA...")
+# STEP 5: Merge data (BioSamples + SRA)
+log("\n Uniendo BioSample + SRA...")
 merged = pd.merge(df_bs_new, df_sra_new,
                   left_on="BioSampleID", right_on="BioSample", how="left")
 merged = drop_similar_columns(merged, threshold=0.8)
@@ -216,7 +222,7 @@ if merged.empty:
     NEW_RUNS_FILE.write_text("")
     sys.exit(0)
 
-# PASO 6: Geocodificar
+# STEP 6: Unify location data, look up states and clean it 
 log("\nExtrayendo estado y coordenadas...")
 geo_col = next((c for c in merged.columns if "geo_loc" in c.lower()), None)
 if geo_col:
@@ -229,7 +235,7 @@ else:
 
 log(f"  Con estado identificado: {merged['state'].ne('').sum()}/{len(merged)}")
 
-# PASO 7: Actualizar metadata_cleaned.csv
+# STEP 7: Update metadata_cleaned.csv with new info
 log("\nActualizando metadata_cleaned.csv...")
 if not df_existing.empty:
     all_cols = list(dict.fromkeys(list(df_existing.columns) + list(merged.columns)))
@@ -242,7 +248,7 @@ else:
 df_updated.to_csv(METADATA_CSV, index=False)
 log(f"  Total filas en CSV: {len(df_updated)} (+{len(merged)} nuevas)")
 
-# PASO 8: Guardar new_runs.txt
+# STEP 8: Save new_runs.txt
 new_run_ids = [r.strip() for r in merged["Run"].dropna().tolist()
                if str(r).strip().startswith(("SRR","ERR","DRR"))]
 NEW_RUNS_FILE.write_text("\n".join(sorted(new_run_ids)) + "\n")
