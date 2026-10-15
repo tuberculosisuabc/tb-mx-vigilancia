@@ -11,6 +11,9 @@ jobs:
     timeout-minutes: 340      # 5h 40min (suficiente para ~30 muestras nuevas) 
     permissions:
       contents: write         # crear el release y guardar metadata_cleaned.csv en el repo
+    defaults:
+      run:
+        shell: bash -el {0}   # login shell so every step uses the conda environment
 
 #1. INSTALAR EN GITHUB PROGRAMAS/PAQUETES NECESARIOS PARA EJECUCIÓN
     steps:  
@@ -18,42 +21,32 @@ jobs:
       - name: Checkout repositorio
         uses: actions/checkout@v4
 
-      # 1.2 Python 
-      - name: Configurar Python 3.11
-        uses: actions/setup-python@v5
+      # 1.2 Conda: TB-Profiler is distributed through bioconda (it is not on PyPI).
+      #     Bioconda also provides bwa, samtools, bcftools and the SRA Toolkit.
+      - name: Configurar conda (Miniforge)
+        uses: conda-incubator/setup-miniconda@v3
         with:
+          miniforge-version: latest
+          activate-environment: tbmx
           python-version: "3.11"
-          cache: pip
+          channels: conda-forge,bioconda
+          channel-priority: strict
 
-      - name: Instalar dependencias Python
+      # Versions are pinned to match the historical results (June 2025 run).
+      # 02_run_tbprofiler.py rejects any result produced with other versions.
+      - name: Instalar TB-Profiler y herramientas bioinformáticas
         run: |
-          pip install \
-            biopython \
-            tb-profiler \
-            neo4j \
-            pandas \
-            scipy \
-            numpy \
-            pyyaml
-
-      # 1.3 Herramientas bioinformáticas
-      - name: Instalar herramientas del sistema
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y \
-            bwa samtools bcftools \
-            ncbi-entrez-direct
-
-      - name: Instalar SRA Toolkit
-        run: |
-          wget -q https://ftp-trace.ncbi.nlm.nih.gov/sra/sdk/current/sratoolkit.current-ubuntu64.tar.gz
-          tar -xzf sratoolkit.current-ubuntu64.tar.gz
-          SRADIR=$(ls -d sratoolkit.*-ubuntu64 | head -1)
-          echo "$PWD/$SRADIR/bin" >> $GITHUB_PATH
+          conda install -y tb-profiler=6.6.6 sra-tools entrez-direct \
+            biopython neo4j-python-driver pandas scipy numpy pyyaml
+          tb-profiler version
           prefetch --version
 
-      - name: Actualizar base de datos de TB-Profiler
-        run: tb-profiler update_db
+      - name: Instalar base de datos tbdb (commit 0a909094, 5 ago 2025)
+        run: |
+          git clone https://github.com/jodyphelan/tbdb.git /tmp/tbdb
+          cd /tmp/tbdb
+          git checkout 0a909094
+          tb-profiler create_db --prefix tbdb --load
 
 #2. RESTAURAR JSONS HISTORICOS DESDE GITHUB RELEASE (JSONs de la primera corrida JUN 2025)
       - name: Restaurar JSONs históricos
