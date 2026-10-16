@@ -1,78 +1,41 @@
 #!/usr/bin/env python3
+"""
+Step 4 - Load the CSV files from neo4j_export/ into Neo4j.
 
-#Load resulting CSVs to Neo4j
-    #1. metadata nodes (Location, BioProject, BioSample, Host)
-    #2. Lineage and TimePoint
-    #3. Clusters
-    #4. Metadata relantionships
-    #5. Properties of TB-Profiler into SRARun
-    #6. Relantionships from TB-Profiler
-    #7. Recalculate aggregated counters
-    #8. Verification
+  1. Metadata nodes (Location, BioProject, BioSample, Host) and base SRARun nodes
+  2. Lineage and TimePoint nodes
+  3. Similarity groups (Cluster nodes, replaced on every run)
+  4. Metadata relationships (HAS_RUN, FROM_HOST, COLLECTED_IN, PART_OF)
+  5. TB-Profiler properties on SRARun nodes, and failed runs
+  6. TB-Profiler relationships (lineage, time, groups, drugs, mutations, links)
+  7. Recalculate aggregated counts (QC-passed genomes only)
+  8. Print node and relationship totals
 
-#Usage: python pipeline/04_load_neo4j.py
-import os, sys, re
-from datetime import datetime
+Usage: python pipeline/04_load_neo4j.py
+Requires the NEO4J_URI, NEO4J_USER and NEO4J_PASSWORD environment variables.
+"""
+
+import os
+import re
+import sys
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
-import pandas as pd
-from neo4j import GraphDatabase, exceptions as neo4j_exc
 
-# Neo4j Credential
+import pandas as pd
+from neo4j import GraphDatabase
+
+# --- Configuration ---
 NEO4J_URI  = os.environ.get("NEO4J_URI")
 NEO4J_USER = os.environ.get("NEO4J_USER") or os.environ.get("NEO4J_USERNAME")
 NEO4J_PASS = os.environ.get("NEO4J_PASSWORD")
 
-# Routes
 METADATA_CSV     = Path.home() / "metadata_cleaned.csv"
 NEO4J_EXPORT_DIR = Path.home() / "neo4j_export"
 NEW_RUNS_FILE    = Path.home() / "new_runs.txt"
 FAILED_FILE      = Path.home() / "failed_samples.csv"
 LOG_FILE         = Path.home() / "load_neo4j_update.log"
-BATCH_SIZE       = 500
-
-def log(msg):
-    ts   = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] {msg}"
-    print(line, flush=True)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
-
-def read_csv(filename):
-    path = NEO4J_EXPORT_DIR / filename
-    if not path.exists():
-        log(f"  No encontrado: {filename} — omitido")
-        return []
-    df = pd.read_csv(path, dtype=str).fillna("")
-    log(f"  {filename:<45} {len(df):>6} filas")
-    return df.to_dict("records")
-
-def chunks(lst, n):
-    for i in range(0, len(lst), n):
-        yield lst[i:i+n]
-
-def run_batch(sf, query, rows, label):
-    total    = len(rows)
-    inserted = 0
-    for batch in chunks(rows, BATCH_SIZE):
-        with sf() as session:
-            session.run(query, {"rows": batch})
-        inserted += len(batch)
-        print(f"    {label}: {inserted}/{total} ({inserted/total*100:.0f}%)",
-              end="\r", flush=True)
-    print()
-    log(f"  {label:<42} {inserted:>6} registros")
-
-def parse_year(date_str):
-    """Collection year from an NCBI collection_date ('2019', '2019-05-02').
-    Date ranges such as '2013/2016' return None: the real year is unknown,
-    so these samples are excluded from yearly statistics (no TimePoint)."""
-    if not date_str or date_str.lower() in ("not collected", "missing", "na", "n/a", ""):
-        return None
-    years = re.findall(r"\b(?:19|20)\d{2}\b", date_str)
-    if len(set(years)) != 1:
-        return None
-    return int(years[0])
+BATCH_SIZE       = 500     # rows per UNWIND transaction
 
 LINEAGE_DESC = {
     "lineage1": "Indo-Oceanic (L1)",
@@ -89,500 +52,521 @@ LINEAGE_DESC = {
     "La2"     : "M. caprae (La2)",
     "La3"     : "M. orygis (La3)",
     "mixed"   : "Mixed infection (more than one lineage detected)",
-    "QC_Failed": "QC Failed — low coverage",
+    "QC_Failed": "QC Failed - low coverage",
 }
 
-#Connect to Neo4J
-log("=" * 60)
-log("CARGA INCREMENTAL A NEO4J")
-log(f"URI: {NEO4J_URI}")
+NODE_LABELS = ["SRARun", "BioSample", "Host", "Location", "BioProject",
+               "Lineage", "TimePoint", "Cluster", "Drug", "Mutation"]
+REL_TYPES   = ["HAS_RUN", "FROM_HOST", "COLLECTED_IN", "PART_OF",
+               "BELONGS_TO", "DETECTED_IN", "IN_CLUSTER",
+               "RESISTANT_TO", "HAS_MUTATION", "CONFERS_RESISTANCE", "LINKED_TO"]
 
-try:
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
-    driver.verify_connectivity()
-    log("Conexión exitosa a Neo4j ")
-except Exception as e:
-    log(f"ERROR conectando a Neo4j: {e}")
-    sys.exit(1)
 
-sf = driver.session  # session factory
+# --- Helpers ---
+def log(msg):
+    line = f"[{datetime.now():%H:%M:%S}] {msg}"
+    print(line, flush=True)
+    with open(LOG_FILE, "a") as f:
+        f.write(line + "\n")
 
-# Read new runs
-new_runs = set()
-if NEW_RUNS_FILE.exists():
-    new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
-log(f"Runs nuevos a cargar: {len(new_runs)}")
 
-# Load metadata
-log("\nCargando metadata CSV...")
-df_meta_all = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
-df_meta = (df_meta_all[df_meta_all["Run"] != ""].copy()
-           .assign(_c=(df_meta_all[df_meta_all["Run"] != ""] != "").sum(axis=1))
-           .sort_values("_c", ascending=False)
-           .drop_duplicates(subset="Run")
-           .drop(columns="_c")
-           .reset_index(drop=True))
+def step(title):
+    log("\n" + "=" * 60)
+    log(title)
 
-# Filter only new
-df_meta_new = df_meta[df_meta["Run"].isin(new_runs)].copy()
-log(f"  Runs nuevos en metadata: {len(df_meta_new)}")
 
-# Leer CSVs generados
-log("\nLeyendo CSVs de neo4j_export/...")
-sample_tbp_rows = read_csv("neo4j_nodes_sample.csv")
-df_tbp = pd.DataFrame(sample_tbp_rows) if sample_tbp_rows else pd.DataFrame()
+def read_csv(filename):
+    path = NEO4J_EXPORT_DIR / filename
+    if not path.exists():
+        log(f"  Not found: {filename} - skipped")
+        return []
+    df = pd.read_csv(path, dtype=str).fillna("")
+    log(f"  {filename:<45} {len(df):>6} rows")
+    return df.to_dict("records")
 
-date_lookup = (df_meta.set_index("Run")["collection_date"].fillna("").to_dict()
-               if "collection_date" in df_meta.columns else {})
 
-# STEP 1: metadata nodes (Location, BioProject, BioSample, Host)
-log("\n" + "=" * 60)
-log("PASO 1: Nodos de metadata")
+def chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
 
-location_rows   = []
-bioproject_rows = []
-biosample_rows  = []
-host_rows       = []
-sample_meta_rows = []
-seen_locations   = set()
-seen_bioprojects = set()
 
-for _, row in df_meta_new.iterrows():
-    run   = row.get("Run", "")
-    state = row.get("state", "")
-    bp    = row.get("BioProject_y", "") or row.get("BioProject_x", "") or row.get("BioProject", "")
-    bs_id = row.get("BioSampleID", "")
-    geo   = row.get("geo_loc_name", "")
+def run_batch(session_factory, query, rows, label):
+    """Run an UNWIND query over rows in batches of BATCH_SIZE."""
+    total    = len(rows)
+    inserted = 0
+    for batch in chunks(rows, BATCH_SIZE):
+        with session_factory() as session:
+            session.run(query, {"rows": batch})
+        inserted += len(batch)
+        print(f"    {label}: {inserted}/{total} ({inserted / total * 100:.0f}%)",
+              end="\r", flush=True)
+    print()
+    log(f"  {label:<42} {inserted:>6} records")
 
-    if state and state not in seen_locations:
-        try:
-            lat_raw = row.get("lat", "")
-            lon_raw = row.get("lon", "")
-            lat = float(lat_raw) if lat_raw else None
-            lon = float(lon_raw) if lon_raw else None
-        except ValueError:
-            lat = lon = None
-        location_rows.append({
-            "state": state, "country": geo.split(":")[0].strip() if geo else "Mexico",
-            "lat": lat, "lon": lon,
-        })
-        seen_locations.add(state)
 
-    if bp and bp not in seen_bioprojects:
-        bioproject_rows.append({
-            "bioproject_id": bp,
-            "study_id"     : row.get("SRAStudy", ""),
-        })
-        seen_bioprojects.add(bp)
+def parse_year(date_str):
+    """Collection year from an NCBI collection_date ('2019', '2019-05-02').
+    Date ranges such as '2013/2016' return None: the real year is unknown,
+    so these samples are excluded from yearly statistics (no TimePoint)."""
+    if not date_str or date_str.lower() in ("not collected", "missing", "na", "n/a", ""):
+        return None
+    years = re.findall(r"\b(?:19|20)\d{2}\b", date_str)
+    if len(set(years)) != 1:
+        return None
+    return int(years[0])
 
-    if bs_id:
-        biosample_rows.append({"biosample_id": bs_id})
-        host_rows.append({
-            "host_id"     : bs_id,
-            "host_type"   : row.get("host", ""),
-            "host_sex"    : row.get("host_sex", ""),
-            "host_age"    : row.get("host_age", ""),
-            "host_disease": row.get("host_disease", ""),
-        })
 
-    if run:
-        sample_meta_rows.append({
-            "sample_id"       : run,
-            "biosample_id"    : bs_id,
-            "bioproject_id"   : bp,
-            "collection_date" : row.get("collection_date", ""),
-            "host_sex"        : row.get("host_sex", ""),
-            "host_age"        : row.get("host_age", ""),
-            "host_disease"    : row.get("host_disease", ""),
-            "isolation_source": row.get("isolation_source", ""),
-            "state"           : state,
-            "lat"             : row.get("lat", ""),
-            "lon"             : row.get("lon", ""),
-            "spots"           : row.get("spots", "0"),
-        })
+def top_level(lineage):
+    """'lineage4.1.2' -> 'lineage4'; mixed calls ('lineage2;lineage4') -> 'mixed'."""
+    return "mixed" if ";" in lineage else lineage.split(".")[0]
 
-if location_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (l:Location {state: row.state})
-        SET l.country = row.country,
-            // Keep existing state coordinates; only fill them if missing
-            l.lat     = coalesce(l.lat, toFloat(row.lat)),
-            l.lon     = coalesce(l.lon, toFloat(row.lon))
-    """, location_rows, "Location nodes")
 
-if bioproject_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (p:BioProject {bioproject_id: row.bioproject_id})
-        SET p.study_id = row.study_id
-    """, bioproject_rows, "BioProject nodes")
+# --- Main ---
+def main():
+    log("=" * 60)
+    log("INCREMENTAL LOAD INTO NEO4J")
+    log(f"URI: {NEO4J_URI}")
 
-if biosample_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (b:BioSample {biosample_id: row.biosample_id})
-    """, biosample_rows, "BioSample nodes")
+    try:
+        driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
+        driver.verify_connectivity()
+        log("Connected to Neo4j")
+    except Exception as e:
+        log(f"ERROR connecting to Neo4j: {e}")
+        sys.exit(1)
 
-if host_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (h:Host {host_id: row.host_id})
-        SET h.host_type    = row.host_type,
-            h.host_sex     = row.host_sex,
-            h.host_age     = row.host_age,
-            h.host_disease = row.host_disease
-    """, host_rows, "Host nodes")
+    sf = driver.session  # session factory used by run_batch
 
-# SRARun base (spots)
-srarun_base = [{"run_id": r["sample_id"], "spots": r.get("spots", "0")}
-               for r in sample_meta_rows]
-if srarun_base:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (s:SRARun {run_id: row.run_id})
-        SET s.spots   = CASE WHEN row.spots <> '' THEN toInteger(row.spots) ELSE 0 END,
-            s.has_data = CASE WHEN row.spots <> '0' THEN 'Yes' ELSE 'No' END
-    """, srarun_base, "SRARun base nodes")
+    new_runs = set()
+    if NEW_RUNS_FILE.exists():
+        new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
+    log(f"New runs to load: {len(new_runs)}")
 
-#STEP 2: Lineage and TimePoint
-log("\n" + "=" * 60)
-log("PASO 2: Lineage y TimePoint")
+    # Metadata: one row per run (the most complete row when a run is duplicated)
+    log("\nLoading metadata CSV...")
+    df_meta_all = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
+    with_run    = df_meta_all[df_meta_all["Run"] != ""]
+    df_meta = (with_run.copy()
+               .assign(_c=(with_run != "").sum(axis=1))
+               .sort_values("_c", ascending=False)
+               .drop_duplicates(subset="Run")
+               .drop(columns="_c")
+               .reset_index(drop=True))
+    df_meta_new = df_meta[df_meta["Run"].isin(new_runs)].copy()
+    log(f"  New runs in metadata: {len(df_meta_new)}")
 
-lineage_map      = defaultdict(lambda: {"sub_lineages": set(), "count": 0})
-belongs_to_rows  = []
-detected_in_rows = []
+    log("\nReading CSVs from neo4j_export/...")
+    sample_tbp_rows = read_csv("neo4j_nodes_sample.csv")
+    df_tbp = pd.DataFrame(sample_tbp_rows) if sample_tbp_rows else pd.DataFrame()
 
-if not df_tbp.empty:
-    for _, row in df_tbp.iterrows():
-        lin = row.get("lineage", "")
-        sub = row.get("sub_lineage", "")
-        sid = row.get("sample_id", "")
-        if lin and lin not in ("", "QC_Failed"):
-            top = "mixed" if ";" in lin else lin.split(".")[0]
-            lineage_map[lin]["sub_lineages"].add(sub)
-            lineage_map[lin]["top_level"] = top
-            lineage_map[lin]["count"] += 1
-            belongs_to_rows.append({"sample_id": sid, "lineage_id": lin})
+    date_lookup = (df_meta.set_index("Run")["collection_date"].fillna("").to_dict()
+                   if "collection_date" in df_meta.columns else {})
 
-        date_str = date_lookup.get(sid, "")
-        year     = parse_year(date_str)
-        if year:
-            detected_in_rows.append({
-                "sample_id"   : sid,
-                "timepoint_id": str(year),
-                "year"        : year,
+    # Step 1: Metadata nodes
+    step("STEP 1: Metadata nodes")
+
+    location_rows, bioproject_rows, biosample_rows, host_rows = [], [], [], []
+    sample_meta_rows = []
+    seen_locations, seen_bioprojects = set(), set()
+
+    for _, row in df_meta_new.iterrows():
+        run   = row.get("Run", "")
+        state = row.get("state", "")
+        bp    = row.get("BioProject_y", "") or row.get("BioProject_x", "") or row.get("BioProject", "")
+        bs_id = row.get("BioSampleID", "")
+        geo   = row.get("geo_loc_name", "")
+
+        if state and state not in seen_locations:
+            try:
+                lat = float(row.get("lat", "")) if row.get("lat", "") else None
+                lon = float(row.get("lon", "")) if row.get("lon", "") else None
+            except ValueError:
+                lat = lon = None
+            location_rows.append({
+                "state": state, "country": geo.split(":")[0].strip() if geo else "Mexico",
+                "lat": lat, "lon": lon,
+            })
+            seen_locations.add(state)
+
+        if bp and bp not in seen_bioprojects:
+            bioproject_rows.append({"bioproject_id": bp, "study_id": row.get("SRAStudy", "")})
+            seen_bioprojects.add(bp)
+
+        if bs_id:
+            biosample_rows.append({"biosample_id": bs_id})
+            host_rows.append({
+                "host_id"     : bs_id,
+                "host_type"   : row.get("host", ""),
+                "host_sex"    : row.get("host_sex", ""),
+                "host_age"    : row.get("host_age", ""),
+                "host_disease": row.get("host_disease", ""),
             })
 
-lineage_rows = []
-for lin, info in lineage_map.items():
-    top = "mixed" if ";" in lin else lin.split(".")[0]
-    lineage_rows.append({
-        "lineage_id" : lin,
-        "top_level"  : top,
-        "description": LINEAGE_DESC.get(lin, LINEAGE_DESC.get(top, "")),
-    })
+        if run:
+            sample_meta_rows.append({
+                "sample_id"       : run,
+                "biosample_id"    : bs_id,
+                "bioproject_id"   : bp,
+                "collection_date" : row.get("collection_date", ""),
+                "host_sex"        : row.get("host_sex", ""),
+                "host_age"        : row.get("host_age", ""),
+                "host_disease"    : row.get("host_disease", ""),
+                "isolation_source": row.get("isolation_source", ""),
+                "state"           : state,
+                "lat"             : row.get("lat", ""),
+                "lon"             : row.get("lon", ""),
+                "spots"           : row.get("spots", "0"),
+            })
 
-if lineage_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (l:Lineage {lineage_id: row.lineage_id})
-        SET l.top_level   = row.top_level,
-            l.description = row.description
-    """, lineage_rows, "Lineage nodes")
-
-timepoint_rows = {r["timepoint_id"]: r["year"] for r in detected_in_rows}
-tp_rows = [{"timepoint_id": tid, "year": yr} for tid, yr in timepoint_rows.items()]
-if tp_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (t:TimePoint {timepoint_id: row.timepoint_id})
-        SET t.year = toInteger(row.year)
-    """, tp_rows, "TimePoint nodes")
-
-#STEP 3: Clusters
-log("\n" + "=" * 60)
-log("PASO 3: Clusters")
-
-cluster_rows_csv = read_csv("resistance_region_clusters.csv")
-cluster_nodes    = {}
-for r in cluster_rows_csv:
-    cid = r.get("cluster_id", "")
-    if cid and cid != "singleton":
-        cluster_nodes[cid] = r.get("cluster_size", "1")
-
-if cluster_rows_csv:  #remove previous clisters to recalculate
-    with driver.session() as session:
-        session.run("MATCH (c:Cluster) DETACH DELETE c")
-    log("  Clusters anteriores eliminados")
-    
-if cluster_nodes:
-    cluster_info = {r["cluster_id"]: r for r in cluster_rows_csv}
-    cn_rows = [{"cluster_id": k, "size": v,
-                "method": cluster_info[k].get("method", ""),
-                "snp_threshold": cluster_info[k].get("snp_threshold", "")}
-               for k, v in cluster_nodes.items()]
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (c:Cluster {cluster_id: row.cluster_id})
-        SET c.size          = toInteger(row.size),
-            c.method        = row.method,
-            c.snp_threshold = toInteger(row.snp_threshold)
-    """, cn_rows, "Cluster nodes")
-
-in_cluster_rows = [
-    {"sample_id": r["sample_id"], "cluster_id": r["cluster_id"]}
-    for r in cluster_rows_csv
-    if r.get("cluster_id", "") != "singleton"
-]
-
-#STEP 4: Metadata relantionships
-log("\n" + "=" * 60)
-log("PASO 4: Relaciones de metadata")
-
-# HAS_RUN
-has_run = [{"biosample_id": r["biosample_id"], "run_id": r["sample_id"]}
-           for r in sample_meta_rows if r.get("biosample_id")]
-if has_run:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (b:BioSample {biosample_id: row.biosample_id})
-        MATCH (r:SRARun    {run_id:       row.run_id})
-        MERGE (b)-[:HAS_RUN]->(r)
-    """, has_run, "HAS_RUN rels")
-
-# FROM_HOST
-from_host = [{"sample_id": r["sample_id"], "biosample_id": r["biosample_id"]}
-             for r in sample_meta_rows if r.get("biosample_id")]
-if from_host:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun {run_id:   row.sample_id})
-        MATCH (h:Host   {host_id:  row.biosample_id})
-        MERGE (r)-[:FROM_HOST]->(h)
-    """, from_host, "FROM_HOST rels")
-
-# COLLECTED_IN
-has_loc = [r for r in sample_meta_rows if r.get("state")]
-if has_loc:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun   {run_id: row.sample_id})
-        MATCH (l:Location {state:  row.state})
-        MERGE (r)-[:COLLECTED_IN]->(l)
-    """, has_loc, "COLLECTED_IN rels")
-
-# PART_OF
-has_bp = [r for r in sample_meta_rows if r.get("bioproject_id")]
-if has_bp:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun     {run_id:        row.sample_id})
-        MATCH (p:BioProject {bioproject_id: row.bioproject_id})
-        MERGE (r)-[:PART_OF]->(p)
-    """, has_bp, "PART_OF rels")
-
-# STEP 5: Properties of TB-Profiler into SRARun
-log("\n" + "=" * 60)
-log("PASO 5: Propiedades TB-Profiler")
-
-if sample_tbp_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (r:SRARun {run_id: row.sample_id})
-        SET r.lineage            = row.lineage,
-            r.sub_lineage        = row.sub_lineage,
-            r.drtype             = row.drtype,
-            r.is_mdr             = row.is_mdr,
-            r.is_xdr             = row.is_xdr,
-            r.is_mtb             = row.is_mtb,
-            r.is_rr              = row.is_rr,
-            r.species            = row.species,
-            r.mixed_infection    = row.mixed_infection,
-            r.median_depth       = CASE WHEN row.median_depth <> ''    THEN toFloat(row.median_depth)    ELSE null END,
-            r.pct_mapped         = CASE WHEN row.pct_mapped <> ''      THEN toFloat(row.pct_mapped)      ELSE null END,
-            r.qc_pass            = row.qc_pass,
-            r.qc_warnings        = row.qc_warnings,
-            r.fail_reasons       = row.fail_reasons,
-            r.num_dr_variants    = CASE WHEN row.num_dr_variants <> '' THEN toInteger(row.num_dr_variants) ELSE null END,
-            r.num_other_variants = CASE WHEN row.num_other_variants <> '' THEN toInteger(row.num_other_variants) ELSE null END,
-            r.resistant_drugs    = row.resistant_drugs,
-            r.collection_date    = row.collection_date,
-            r.isolation_source   = row.isolation_source,
-            r.processing_status  = 'ok',
-            r.processing_error   = null,
-            r.tb_profiler_version= row.tb_profiler_version,
-            r.db_version         = row.db_version
-    """, sample_tbp_rows, "SRARun TB-Profiler props")
-
-if FAILED_FILE.exists():
-    failed_rows = pd.read_csv(FAILED_FILE, dtype=str).fillna("").to_dict("records")
-    if failed_rows:
+    if location_rows:
         run_batch(sf, """
             UNWIND $rows AS row
-            MERGE (r:SRARun {run_id: row.run_id})
-            SET r.processing_status = 'failed',
-                r.processing_error  = row.error
-        """, failed_rows, "SRARun failed runs")
+            MERGE (l:Location {state: row.state})
+            SET l.country = row.country,
+                // Keep existing state coordinates; only fill them if missing
+                l.lat     = coalesce(l.lat, toFloat(row.lat)),
+                l.lon     = coalesce(l.lon, toFloat(row.lon))
+        """, location_rows, "Location nodes")
 
-#STEP 6: Relantionships from TB-Profiler
-log("\n" + "=" * 60)
-log("PASO 6: Relaciones TB-Profiler")
+    if bioproject_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (p:BioProject {bioproject_id: row.bioproject_id})
+            SET p.study_id = row.study_id
+        """, bioproject_rows, "BioProject nodes")
 
-if belongs_to_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun  {run_id:     row.sample_id})
-        MATCH (l:Lineage {lineage_id: row.lineage_id})
-        MERGE (r)-[:BELONGS_TO]->(l)
-    """, belongs_to_rows, "BELONGS_TO rels")
+    if biosample_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (b:BioSample {biosample_id: row.biosample_id})
+        """, biosample_rows, "BioSample nodes")
 
-if detected_in_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun    {run_id:       row.sample_id})
-        MATCH (t:TimePoint {timepoint_id: row.timepoint_id})
-        MERGE (r)-[:DETECTED_IN]->(t)
-    """, detected_in_rows, "DETECTED_IN rels")
+    if host_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (h:Host {host_id: row.host_id})
+            SET h.host_type    = row.host_type,
+                h.host_sex     = row.host_sex,
+                h.host_age     = row.host_age,
+                h.host_disease = row.host_disease
+        """, host_rows, "Host nodes")
 
-if in_cluster_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun  {run_id:     row.sample_id})
-        MATCH (c:Cluster {cluster_id: row.cluster_id})
-        MERGE (r)-[:IN_CLUSTER]->(c)
-    """, in_cluster_rows, "IN_CLUSTER rels")
+    # Base SRARun nodes with read counts (spots)
+    srarun_base = [{"run_id": r["sample_id"], "spots": r.get("spots", "0")}
+                   for r in sample_meta_rows]
+    if srarun_base:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (s:SRARun {run_id: row.run_id})
+            SET s.spots    = CASE WHEN row.spots <> '' THEN toInteger(row.spots) ELSE 0 END,
+                s.has_data = CASE WHEN row.spots <> '0' THEN 'Yes' ELSE 'No' END
+        """, srarun_base, "SRARun base nodes")
 
-drug_rows = read_csv("neo4j_nodes_drug.csv")
-if drug_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (d:Drug {name: row.drug})
-        SET d.drug_class = row.drug_class
-    """, drug_rows, "Drug nodes")
+    # Step 2: Lineage and TimePoint nodes
+    step("STEP 2: Lineage and TimePoint")
 
-mut_rows = read_csv("neo4j_nodes_mutation.csv")
-if mut_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MERGE (m:Mutation {mutation_id: row.mutation_id})
-        SET m.gene           = row.gene,
-            m.aa_change      = row.aa_change,
-            m.nt_change      = row.nt_change,
-            m.variant_type   = row.variant_type,
-            m.genome_pos     = CASE WHEN row.genome_pos <> '' THEN toInteger(row.genome_pos) ELSE null END,
-            m.confidence     = row.confidence,
-            m.who_confidence = row.who_confidence,
-            m.variant_class  = row.variant_class,
-            m.drug           = row.drug
-    """, mut_rows, "Mutation nodes")
+    lineage_ids      = {}     # ordered set (dict keys) of lineages seen
+    belongs_to_rows  = []
+    detected_in_rows = []
 
-res_rows = read_csv("neo4j_rel_resistant_to.csv")
-if res_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun {run_id: row.sample_id})
-        MATCH (d:Drug   {name:   row.drug})
-        MERGE (r)-[rel:RESISTANT_TO]->(d)
-        SET rel.confidence     = row.confidence,
-            rel.who_confidence = row.who_confidence
-    """, res_rows, "RESISTANT_TO rels")
+    if not df_tbp.empty:
+        for _, row in df_tbp.iterrows():
+            lin = row.get("lineage", "")
+            sid = row.get("sample_id", "")
+            if lin and lin != "QC_Failed":
+                lineage_ids[lin] = None
+                belongs_to_rows.append({"sample_id": sid, "lineage_id": lin})
 
-hasmut_rows = read_csv("neo4j_rel_has_mutation.csv")
-if hasmut_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (r:SRARun   {run_id:      row.sample_id})
-        MATCH (m:Mutation {mutation_id: row.mutation_id})
-        MERGE (r)-[rel:HAS_MUTATION]->(m)
-        SET rel.allele_freq   = CASE WHEN row.allele_freq   <> '' THEN toFloat(row.allele_freq)     ELSE null END,
-            rel.variant_depth = CASE WHEN row.variant_depth <> '' THEN toInteger(row.variant_depth) ELSE null END,
-            rel.drug          = row.drug,
-            rel.variant_class = row.variant_class
-    """, hasmut_rows, "HAS_MUTATION rels")
+            year = parse_year(date_lookup.get(sid, ""))
+            if year:
+                detected_in_rows.append({"sample_id": sid, "timepoint_id": str(year), "year": year})
 
-if mut_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (m:Mutation {mutation_id: row.mutation_id})
-        MATCH (d:Drug     {name:        row.drug})
-        MERGE (m)-[r:CONFERS_RESISTANCE]->(d)
-        SET r.confidence     = row.confidence,
-            r.who_confidence = row.who_confidence
-    """, mut_rows, "CONFERS_RESISTANCE rels")
+    lineage_rows = [{"lineage_id" : lin,
+                     "top_level"  : top_level(lin),
+                     "description": LINEAGE_DESC.get(lin, LINEAGE_DESC.get(top_level(lin), ""))}
+                    for lin in lineage_ids]
+    if lineage_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (l:Lineage {lineage_id: row.lineage_id})
+            SET l.top_level   = row.top_level,
+                l.description = row.description
+        """, lineage_rows, "Lineage nodes")
 
-linked_rows = read_csv("neo4j_rel_linked_to.csv")
-if linked_rows:
-    run_batch(sf, """
-        UNWIND $rows AS row
-        MATCH (a:SRARun {run_id: row.sample_a})
-        MATCH (b:SRARun {run_id: row.sample_b})
-        MERGE (a)-[rel:LINKED_TO]->(b)
-        SET rel.snp_dist = CASE WHEN row.snp_dist <> '' THEN toInteger(row.snp_dist) ELSE null END
-    """, linked_rows, "LINKED_TO rels")
+    tp_rows = [{"timepoint_id": tid, "year": yr}
+               for tid, yr in {r["timepoint_id"]: r["year"] for r in detected_in_rows}.items()]
+    if tp_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (t:TimePoint {timepoint_id: row.timepoint_id})
+            SET t.year = toInteger(row.year)
+        """, tp_rows, "TimePoint nodes")
 
-# STEP 7: Recalculate aggregated counters
-log("\n" + "=" * 60)
-log("PASO 7: Recalculando conteos agregados")
+    # Step 3: Similarity groups
+    # Groups are recalculated from ALL samples on every run, so the previous
+    # Cluster nodes and IN_CLUSTER relationships are replaced.
+    step("STEP 3: Similarity groups (Cluster)")
 
-with driver.session() as session:
-    session.run("""
-        MATCH (l:Lineage)
-        OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
-        WITH l, count(s) AS cnt
-        SET l.sample_count = cnt
-    """)
-    log("  Lineage.sample_count actualizado ")
+    cluster_rows_csv = read_csv("resistance_region_clusters.csv")
+    cluster_info = {r["cluster_id"]: r for r in cluster_rows_csv
+                    if r.get("cluster_id", "") not in ("", "singleton")}
 
-    session.run("""
-        MATCH (t:TimePoint)
-        OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:DETECTED_IN]->(t)
-        WITH t,
-             count(s) AS total,
-             sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr_cnt,
-             sum(CASE WHEN s.is_rr  = 'Yes' THEN 1 ELSE 0 END) AS rr_cnt
-        SET t.sample_count = total,
-            t.mdr_count    = mdr_cnt,
-            t.mdr_rate     = CASE WHEN total > 0
-                             THEN round(toFloat(mdr_cnt)/total*100, 1)
-                             ELSE 0.0 END,
-            t.rr_count     = rr_cnt,
-            t.rr_rate      = CASE WHEN total > 0
-                             THEN round(toFloat(rr_cnt)/total*100, 1)
-                             ELSE 0.0 END
-    """)
-    log("  TimePoint conteos actualizados ✅")
+    if cluster_rows_csv:
+        with driver.session() as session:
+            session.run("MATCH (c:Cluster) DETACH DELETE c")
+        log("  Previous groups removed")
 
-    session.run("""
-        MATCH (c:Cluster)
-        OPTIONAL MATCH (s:SRARun)-[:IN_CLUSTER]->(c)
-        WITH c, count(s) AS cnt
-        SET c.size = cnt
-    """)
-    log("  Cluster.size actualizado ")
+    if cluster_info:
+        cn_rows = [{"cluster_id": cid, "size": r.get("cluster_size", "1"),
+                    "method": r.get("method", ""), "snp_threshold": r.get("snp_threshold", "")}
+                   for cid, r in cluster_info.items()]
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (c:Cluster {cluster_id: row.cluster_id})
+            SET c.size          = toInteger(row.size),
+                c.method        = row.method,
+                c.snp_threshold = toInteger(row.snp_threshold)
+        """, cn_rows, "Cluster nodes")
 
-# STEP 8: Verification
-log("\n" + "=" * 60)
-log("PASO 8: Conteos en Neo4j tras la actualización")
+    in_cluster_rows = [{"sample_id": r["sample_id"], "cluster_id": r["cluster_id"]}
+                       for r in cluster_rows_csv if r.get("cluster_id", "") != "singleton"]
 
-node_labels = ["SRARun","BioSample","Host","Location","BioProject",
-               "Lineage","TimePoint","Cluster","Drug","Mutation"]
-rel_types   = ["HAS_RUN","FROM_HOST","COLLECTED_IN","PART_OF",
-               "BELONGS_TO","DETECTED_IN","IN_CLUSTER",
-               "RESISTANT_TO","HAS_MUTATION","CONFERS_RESISTANCE","LINKED_TO"]
+    # Step 4: Metadata relationships
+    step("STEP 4: Metadata relationships")
 
-with driver.session() as s:
-    log(f"\n  {'NODO':<25} {'TOTAL':>6}")
-    log(f"  {'-'*25} {'-'*6}")
-    for label in node_labels:
-        n = s.run(f"MATCH (n:{label}) RETURN count(n) AS c").single()["c"]
-        log(f"  {label:<25} {n:>6}")
+    has_biosample = [r for r in sample_meta_rows if r.get("biosample_id")]
+    if has_biosample:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (b:BioSample {biosample_id: row.biosample_id})
+            MATCH (r:SRARun    {run_id:       row.run_id})
+            MERGE (b)-[:HAS_RUN]->(r)
+        """, [{"biosample_id": r["biosample_id"], "run_id": r["sample_id"]} for r in has_biosample],
+            "HAS_RUN rels")
 
-    log(f"\n  {'RELACIÓN':<25} {'TOTAL':>6}")
-    log(f"  {'-'*25} {'-'*6}")
-    for rel in rel_types:
-        n = s.run(f"MATCH ()-[r:{rel}]->() RETURN count(r) AS c").single()["c"]
-        log(f"  {rel:<25} {n:>6}")
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun {run_id:   row.sample_id})
+            MATCH (h:Host   {host_id:  row.biosample_id})
+            MERGE (r)-[:FROM_HOST]->(h)
+        """, [{"sample_id": r["sample_id"], "biosample_id": r["biosample_id"]} for r in has_biosample],
+            "FROM_HOST rels")
 
-driver.close()
-log("\n Carga incremental completada.")
+    has_loc = [r for r in sample_meta_rows if r.get("state")]
+    if has_loc:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun   {run_id: row.sample_id})
+            MATCH (l:Location {state:  row.state})
+            MERGE (r)-[:COLLECTED_IN]->(l)
+        """, has_loc, "COLLECTED_IN rels")
+
+    has_bp = [r for r in sample_meta_rows if r.get("bioproject_id")]
+    if has_bp:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun     {run_id:        row.sample_id})
+            MATCH (p:BioProject {bioproject_id: row.bioproject_id})
+            MERGE (r)-[:PART_OF]->(p)
+        """, has_bp, "PART_OF rels")
+
+    # Step 5: TB-Profiler properties on SRARun nodes
+    step("STEP 5: TB-Profiler properties")
+
+    if sample_tbp_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (r:SRARun {run_id: row.sample_id})
+            SET r.lineage            = row.lineage,
+                r.sub_lineage        = row.sub_lineage,
+                r.drtype             = row.drtype,
+                r.is_mdr             = row.is_mdr,
+                r.is_xdr             = row.is_xdr,
+                r.is_mtb             = row.is_mtb,
+                r.is_rr              = row.is_rr,
+                r.species            = row.species,
+                r.mixed_infection    = row.mixed_infection,
+                r.median_depth       = CASE WHEN row.median_depth <> ''    THEN toFloat(row.median_depth)    ELSE null END,
+                r.pct_mapped         = CASE WHEN row.pct_mapped <> ''      THEN toFloat(row.pct_mapped)      ELSE null END,
+                r.qc_pass            = row.qc_pass,
+                r.qc_warnings        = row.qc_warnings,
+                r.fail_reasons       = row.fail_reasons,
+                r.num_dr_variants    = CASE WHEN row.num_dr_variants <> '' THEN toInteger(row.num_dr_variants) ELSE null END,
+                r.num_other_variants = CASE WHEN row.num_other_variants <> '' THEN toInteger(row.num_other_variants) ELSE null END,
+                r.resistant_drugs    = row.resistant_drugs,
+                r.collection_date    = row.collection_date,
+                r.isolation_source   = row.isolation_source,
+                r.processing_status  = 'ok',
+                r.processing_error   = null,
+                r.tb_profiler_version= row.tb_profiler_version,
+                r.db_version         = row.db_version
+        """, sample_tbp_rows, "SRARun TB-Profiler props")
+
+    # Runs where the download or TB-Profiler failed (written by 02_run_tbprofiler.py)
+    if FAILED_FILE.exists():
+        failed_rows = pd.read_csv(FAILED_FILE, dtype=str).fillna("").to_dict("records")
+        if failed_rows:
+            run_batch(sf, """
+                UNWIND $rows AS row
+                MERGE (r:SRARun {run_id: row.run_id})
+                SET r.processing_status = 'failed',
+                    r.processing_error  = row.error
+            """, failed_rows, "SRARun failed runs")
+
+    # Step 6: TB-Profiler relationships
+    step("STEP 6: TB-Profiler relationships")
+
+    if belongs_to_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun  {run_id:     row.sample_id})
+            MATCH (l:Lineage {lineage_id: row.lineage_id})
+            MERGE (r)-[:BELONGS_TO]->(l)
+        """, belongs_to_rows, "BELONGS_TO rels")
+
+    if detected_in_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun    {run_id:       row.sample_id})
+            MATCH (t:TimePoint {timepoint_id: row.timepoint_id})
+            MERGE (r)-[:DETECTED_IN]->(t)
+        """, detected_in_rows, "DETECTED_IN rels")
+
+    if in_cluster_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun  {run_id:     row.sample_id})
+            MATCH (c:Cluster {cluster_id: row.cluster_id})
+            MERGE (r)-[:IN_CLUSTER]->(c)
+        """, in_cluster_rows, "IN_CLUSTER rels")
+
+    drug_rows = read_csv("neo4j_nodes_drug.csv")
+    if drug_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (d:Drug {name: row.drug})
+            SET d.drug_class = row.drug_class
+        """, drug_rows, "Drug nodes")
+
+    mut_rows = read_csv("neo4j_nodes_mutation.csv")
+    if mut_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MERGE (m:Mutation {mutation_id: row.mutation_id})
+            SET m.gene           = row.gene,
+                m.aa_change      = row.aa_change,
+                m.nt_change      = row.nt_change,
+                m.variant_type   = row.variant_type,
+                m.genome_pos     = CASE WHEN row.genome_pos <> '' THEN toInteger(row.genome_pos) ELSE null END,
+                m.confidence     = row.confidence,
+                m.who_confidence = row.who_confidence,
+                m.variant_class  = row.variant_class,
+                m.drug           = row.drug
+        """, mut_rows, "Mutation nodes")
+
+    res_rows = read_csv("neo4j_rel_resistant_to.csv")
+    if res_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun {run_id: row.sample_id})
+            MATCH (d:Drug   {name:   row.drug})
+            MERGE (r)-[rel:RESISTANT_TO]->(d)
+            SET rel.confidence     = row.confidence,
+                rel.who_confidence = row.who_confidence
+        """, res_rows, "RESISTANT_TO rels")
+
+    hasmut_rows = read_csv("neo4j_rel_has_mutation.csv")
+    if hasmut_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (r:SRARun   {run_id:      row.sample_id})
+            MATCH (m:Mutation {mutation_id: row.mutation_id})
+            MERGE (r)-[rel:HAS_MUTATION]->(m)
+            SET rel.allele_freq   = CASE WHEN row.allele_freq   <> '' THEN toFloat(row.allele_freq)     ELSE null END,
+                rel.variant_depth = CASE WHEN row.variant_depth <> '' THEN toInteger(row.variant_depth) ELSE null END,
+                rel.drug          = row.drug,
+                rel.variant_class = row.variant_class
+        """, hasmut_rows, "HAS_MUTATION rels")
+
+    # Only resistance mutations have a drug; rows without one find no Drug and are skipped
+    if mut_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (m:Mutation {mutation_id: row.mutation_id})
+            MATCH (d:Drug     {name:        row.drug})
+            MERGE (m)-[r:CONFERS_RESISTANCE]->(d)
+            SET r.confidence     = row.confidence,
+                r.who_confidence = row.who_confidence
+        """, mut_rows, "CONFERS_RESISTANCE rels")
+
+    linked_rows = read_csv("neo4j_rel_linked_to.csv")
+    if linked_rows:
+        run_batch(sf, """
+            UNWIND $rows AS row
+            MATCH (a:SRARun {run_id: row.sample_a})
+            MATCH (b:SRARun {run_id: row.sample_b})
+            MERGE (a)-[rel:LINKED_TO]->(b)
+            SET rel.snp_dist = CASE WHEN row.snp_dist <> '' THEN toInteger(row.snp_dist) ELSE null END
+        """, linked_rows, "LINKED_TO rels")
+
+    # Step 7: Aggregated counts (QC-passed genomes only)
+    step("STEP 7: Recalculating aggregated counts")
+
+    with driver.session() as session:
+        session.run("""
+            MATCH (l:Lineage)
+            OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
+            WITH l, count(s) AS cnt
+            SET l.sample_count = cnt
+        """)
+        log("  Lineage.sample_count updated")
+
+        session.run("""
+            MATCH (t:TimePoint)
+            OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:DETECTED_IN]->(t)
+            WITH t,
+                 count(s) AS total,
+                 sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr_cnt,
+                 sum(CASE WHEN s.is_rr  = 'Yes' THEN 1 ELSE 0 END) AS rr_cnt
+            SET t.sample_count = total,
+                t.mdr_count    = mdr_cnt,
+                t.mdr_rate     = CASE WHEN total > 0
+                                 THEN round(toFloat(mdr_cnt)/total*100, 1)
+                                 ELSE 0.0 END,
+                t.rr_count     = rr_cnt,
+                t.rr_rate      = CASE WHEN total > 0
+                                 THEN round(toFloat(rr_cnt)/total*100, 1)
+                                 ELSE 0.0 END
+        """)
+        log("  TimePoint counts updated")
+
+        session.run("""
+            MATCH (c:Cluster)
+            OPTIONAL MATCH (s:SRARun)-[:IN_CLUSTER]->(c)
+            WITH c, count(s) AS cnt
+            SET c.size = cnt
+        """)
+        log("  Cluster.size updated")
+
+    # Step 8: Totals
+    step("STEP 8: Neo4j totals after the update")
+
+    with driver.session() as session:
+        log(f"\n  {'NODE':<25} {'TOTAL':>6}")
+        log(f"  {'-' * 25} {'-' * 6}")
+        for label in NODE_LABELS:
+            n = session.run(f"MATCH (n:{label}) RETURN count(n) AS c").single()["c"]
+            log(f"  {label:<25} {n:>6}")
+
+        log(f"\n  {'RELATIONSHIP':<25} {'TOTAL':>6}")
+        log(f"  {'-' * 25} {'-' * 6}")
+        for rel in REL_TYPES:
+            n = session.run(f"MATCH ()-[r:{rel}]->() RETURN count(r) AS c").single()["c"]
+            log(f"  {rel:<25} {n:>6}")
+
+    driver.close()
+    log("\nIncremental load completed.")
+
+
+if __name__ == "__main__":
+    main()
