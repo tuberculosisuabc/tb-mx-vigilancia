@@ -1,7 +1,11 @@
 import streamlit as st
 import base64
+import json
 import os
+import urllib.request
 from datetime import datetime
+
+GITHUB_REPO = "tuberculosisuabc/tb-mx-vigilancia"
 
 # LOGO — loaded from file and embedded as base64
 
@@ -245,12 +249,33 @@ def render_topnav(current_page: str = "Inicio"):
     st.markdown(f'<nav class="topnav">{items}</nav>', unsafe_allow_html=True)
 
 
-def render_footer():
-    """Dark green footer bar — matches nav bar style."""
+@st.cache_data(ttl=6 * 3600)
+def get_last_data_update() -> str:
+    """Fecha del último release de datos del pipeline (tags '...-data') en GitHub,
+    es decir, la última vez que se actualizaron los datos. '' si no se puede obtener."""
     meses = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
              "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    now = datetime.now()
-    fecha = f"{meses[now.month]} {now.year}"
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            releases = json.load(resp)
+        dates = [r["published_at"] for r in releases
+                 if "data" in r.get("tag_name", "") and r.get("published_at")]
+        if not dates:
+            return ""
+        last = datetime.strptime(max(dates)[:10], "%Y-%m-%d")
+        return f"{meses[last.month]} {last.year}"
+    except Exception:
+        return ""
+
+
+def render_footer():
+    """Barra inferior verde oscuro, con el mismo estilo que la barra de navegación."""
+    fecha = get_last_data_update()
+    actualizado = (f"""
+        <span style="font-family:'Poppins',sans-serif;font-size:0.75rem;color:#8DC4A8;">
+            Datos actualizados: <strong style="color:#D4EDE0;font-weight:500;">{fecha}</strong>
+        </span>""" if fecha else "")
     st.markdown(f"""
     <div style="
         background:#1B3A2D;
@@ -273,9 +298,7 @@ def render_footer():
         <span style="font-family:'Poppins',sans-serif;font-size:0.75rem;color:#8DC4A8;">
             Base: <strong style="color:#D4EDE0;font-weight:500;">Neo4j</strong>
         </span>
-        <span style="font-family:'Poppins',sans-serif;font-size:0.75rem;color:#8DC4A8;">
-            Actualizado: <strong style="color:#D4EDE0;font-weight:500;">{fecha}</strong>
-        </span>
+        {actualizado}
     </div>
     """, unsafe_allow_html=True)
 
