@@ -1,39 +1,25 @@
-import streamlit as st
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import pandas as pd
-from db import get_lineage_dist
-from utils import render_topnav, render_footer, render_sample_size
-from utils import LINEAGE_COLORS, LINEAGE_DESCRIPTIONS, lineage_es, sublineage_es
+import streamlit as st
 
-st.set_page_config(
-    page_title="Linajes · SVG-TB-MX",
-    page_icon="🫁",
-    layout="wide",
-    initial_sidebar_state="collapsed",
+from db import get_lineage_dist
+from utils import (AXIS_GRID, AXIS_PLAIN, BG, LINEAGE_COLORS, LINEAGE_DESCRIPTIONS, TEXT_DARK,
+                   TEXT_MUTED, lineage_es, page_header, render_footer, section, setup_page,
+                   show_fig, style_fig, sublineage_es)
+
+setup_page("Linajes")
+
+page_header(
+    "Distribución de Linajes",
+    """Linajes y sub-linajes de <i>M. tuberculosis</i> identificados con TB-Profiler en los genomas
+    con QC aprobado.""",
 )
 
-render_topnav("Linajes")
-
-# ── Header ────────────────────────────────────────────────────────────
-st.markdown("""
-    <h1>Distribución de Linajes</h1>
-    <p style='color:#3D5A4D;font-size:1.05rem;line-height:1.7'>
-        Linajes y sub-linajes de <i>M. tuberculosis</i> identificados con TB-Profiler en los genomas con QC aprobado.
-    </p>
-""", unsafe_allow_html=True)
-
-render_sample_size()
-
-
-# ── Main distribution ─────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Distribución Global</div>", unsafe_allow_html=True)
-
-lin_data = get_lineage_dist()
-df_lin = pd.DataFrame(lin_data)
+# ── Datos: nombres y descripciones en español ────────────────────────
+df_lin = pd.DataFrame(get_lineage_dist())
 df_lin = df_lin[df_lin["count"].fillna(0) > 0].copy()
-# Nombres y descripciones en español (theme.py); las infecciones mixtas
-# ("lineage2;lineage4") se agrupan en una sola categoría
+# Las infecciones mixtas ("lineage2;lineage4") se agrupan en una sola categoría
 df_lin["lineage"] = df_lin["lineage"].map(lineage_es)
 df_lin["sub_lineages"] = df_lin["sub_lineages"].apply(
     lambda subs: [sublineage_es(s) for s in subs if s] if isinstance(subs, list) else []
@@ -42,36 +28,28 @@ df_lin = (df_lin.groupby("lineage", as_index=False)
           .agg(count=("count", "sum"),
                sub_lineages=("sub_lineages", lambda x: sorted({s for subs in x for s in subs})))
           .sort_values("count", ascending=False))
-df_lin["description"] = df_lin["lineage"].map(LINEAGE_DESCRIPTIONS).fillna(df_lin["lineage"])
+df_lin["description"]  = df_lin["lineage"].map(LINEAGE_DESCRIPTIONS).fillna(df_lin["lineage"])
 df_lin["sub_lineages"] = df_lin["sub_lineages"].apply(lambda subs: ", ".join(subs) or "—")
+
+# ── Distribución global ──────────────────────────────────────────────
+section("Distribución Global")
 
 col1, col2 = st.columns(2)
 
 with col1:
-    fig_donut = px.pie(
-        df_lin, values="count", names="lineage",
-        color="lineage", color_discrete_map=LINEAGE_COLORS,
-        hole=0.55,
-        custom_data=["description"],
-    )
+    fig_donut = px.pie(df_lin, values="count", names="lineage", hole=0.55,
+                       color="lineage", color_discrete_map=LINEAGE_COLORS,
+                       custom_data=["description"])
     fig_donut.update_traces(
         textposition="outside",
         textfont_size=11,
         hovertemplate="<b>%{label}</b><br>%{customdata[0]}<br>Muestras: %{value}<br>%{percent}<extra></extra>",
-        marker=dict(line=dict(color="#F4F1EA", width=2)),
+        marker=dict(line=dict(color=BG, width=2)),
     )
-    fig_donut.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#3D5A4D", family="Poppins"),
-        legend=dict(orientation="v", bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
-        margin=dict(t=30, b=30, l=0, r=0),
-        height=500,
-        annotations=[dict(
-            text=f"<b>{df_lin['count'].sum()}</b><br>genomas",
-            x=0.5, y=0.5, font_size=13, font_color="#1B3A2D", showarrow=False,
-        )],
-    )
-    st.plotly_chart(fig_donut, use_container_width=True)
+    style_fig(fig_donut, height=500, margin=dict(t=30, b=30, l=0, r=0), legend=dict(orientation="v"),
+              annotations=[dict(text=f"<b>{df_lin['count'].sum()}</b><br>genomas", x=0.5, y=0.5,
+                                font_size=13, font_color=TEXT_DARK, showarrow=False)])
+    show_fig(fig_donut)
 
 with col2:
     fig_bar = go.Figure(go.Bar(
@@ -81,26 +59,17 @@ with col2:
         marker_color=[LINEAGE_COLORS.get(l, "#64748b") for l in df_lin["lineage"]],
         text=df_lin["count"],
         textposition="outside",
-        textfont=dict(color="#3D5A4D", size=11),
+        textfont=dict(color=TEXT_MUTED, size=11),
         customdata=df_lin[["description", "sub_lineages"]].values,
-        hovertemplate=(
-            "<b>%{y}</b><br>%{customdata[0]}<br>"
-            "Muestras: %{x}<br>Sub-linajes: %{customdata[1]}<extra></extra>"
-        ),
+        hovertemplate=("<b>%{y}</b><br>%{customdata[0]}<br>"
+                       "Muestras: %{x}<br>Sub-linajes: %{customdata[1]}<extra></extra>"),
     ))
-    fig_bar.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#3D5A4D", family="Poppins"),
-        xaxis=dict(showgrid=True, gridcolor="#D5D0C4", color="#3D5A4D"),
-        yaxis=dict(showgrid=False, color="#3D5A4D", autorange="reversed"),
-        margin=dict(t=10, b=10, l=10, r=60),
-        height=320,
-    )
-    st.plotly_chart(fig_bar, use_container_width=True)
+    style_fig(fig_bar, height=320, margin=dict(t=10, b=10, l=10, r=60),
+              xaxis=AXIS_GRID, yaxis=dict(AXIS_PLAIN, autorange="reversed"))
+    show_fig(fig_bar)
 
-# ── Detail table ──────────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Detalle de Linajes</div>", unsafe_allow_html=True)
+# ── Detalle ──────────────────────────────────────────────────────────
+section("Detalle de Linajes")
 
 df_display = df_lin[["lineage", "description", "count", "sub_lineages"]].copy()
 df_display.columns = ["Linaje", "Descripción", "Muestras", "Sub-linajes observados"]
@@ -112,7 +81,7 @@ st.dataframe(
         "Muestras": st.column_config.ProgressColumn(
             "Muestras", min_value=0, max_value=int(df_lin["count"].max())
         ),
-    }
+    },
 )
 
 render_footer()
