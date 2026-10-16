@@ -38,7 +38,7 @@ with f3:
     years    = get_years()
     year_sel = st.selectbox("Año de colección", ["Todos"] + [str(y) for y in years])
 with f4:
-    qc_only = st.checkbox("Solo QC PASS", value=True)
+    qc_only = st.checkbox("Solo genomas con QC aprobado", value=True)
 
 # ── Data ──────────────────────────────────────────────────────────────
 with st.spinner("Cargando muestras..."):
@@ -71,6 +71,7 @@ drtype_colors = {
     "XDR-TB":       "⚫",
     "Other":        "⚪",
     "Low_coverage": "⬜",
+    "No-Mtb":       "🟤",
 }
 df["drtype_icon"] = df["drtype"].map(drtype_colors).fillna("⚪") + " " + df["drtype"].fillna("")
 
@@ -80,7 +81,7 @@ display_cols = {
     "lineage":         "Linaje",
     "sub_lineage":     "Sub-linaje",
     "state":           "Estado",
-    "collection_date": "Año",
+    "year":            "Año",
     "median_depth":    "Profundidad",
     "resistant_drugs": "Fármacos resist.",
 }
@@ -94,6 +95,7 @@ st.dataframe(
     column_config={
         "ID Muestra":      st.column_config.TextColumn(width="small"),
         "Resistencia":     st.column_config.TextColumn(width="medium"),
+        "Año":             st.column_config.NumberColumn(format="%d", width="small"),
         "Profundidad":     st.column_config.NumberColumn(format="%.1f×", width="small"),
         "Fármacos resist.": st.column_config.TextColumn(width="large"),
     }
