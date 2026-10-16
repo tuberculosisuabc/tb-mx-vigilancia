@@ -34,6 +34,7 @@ html, body, [class*="css"], p, span, div, label, button, input {
 /* Hide sidebar & Streamlit chrome */
 [data-testid="stSidebar"]        { display: none !important; }
 [data-testid="collapsedControl"] { display: none !important; }
+[data-testid="stSidebarCollapsedControl"] { display: none !important; }
 [data-testid="stHeader"]         { display: none !important; }
 #MainMenu { visibility: hidden; }
 footer    { visibility: hidden; }
@@ -249,33 +250,37 @@ def render_topnav(current_page: str = "Inicio"):
     st.markdown(f'<nav class="topnav">{items}</nav>', unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=6 * 3600)
-def get_last_data_update() -> str:
-    """Fecha del último release de datos del pipeline (tags '...-data') en GitHub,
-    es decir, la última vez que se actualizaron los datos. '' si no se puede obtener."""
-    meses = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+@st.cache_data(ttl=3600)
+def get_last_pipeline_run() -> str:
+    """Fecha de la última ejecución exitosa del workflow "Actualizar pipeline TB-MX"
+    (.github/workflows/pipeline.yml), p. ej. '16 de octubre de 2026'.
+    Devuelve '' si no se puede consultar GitHub (el pie de página omite la fecha)."""
+    meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+             "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
     try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            releases = json.load(resp)
-        dates = [r["published_at"] for r in releases
-                 if "data" in r.get("tag_name", "") and r.get("published_at")]
-        if not dates:
+        url = (f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/"
+               "pipeline.yml/runs?status=success&per_page=1")
+        req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            runs = json.load(resp).get("workflow_runs", [])
+        if not runs:
             return ""
-        last = datetime.strptime(max(dates)[:10], "%Y-%m-%d")
-        return f"{meses[last.month]} {last.year}"
+        last = datetime.strptime(runs[0]["updated_at"][:10], "%Y-%m-%d")
+        return f"{last.day} de {meses[last.month]} de {last.year}"
     except Exception:
         return ""
 
 
 def render_footer():
     """Barra inferior verde oscuro, con el mismo estilo que la barra de navegación."""
-    fecha = get_last_data_update()
-    actualizado = (f"""
-        <span style="font-family:'Poppins',sans-serif;font-size:0.75rem;color:#8DC4A8;">
-            Datos actualizados: <strong style="color:#D4EDE0;font-weight:500;">{fecha}</strong>
-        </span>""" if fecha else "")
+    fecha = get_last_pipeline_run()
+    # En una sola línea: en Markdown, una línea en blanco seguida de texto con
+    # sangría se muestra como bloque de código en vez de HTML
+    actualizado = (
+        "<span style=\"font-family:'Poppins',sans-serif;font-size:0.75rem;color:#8DC4A8;\">"
+        f"Datos actualizados: <strong style=\"color:#D4EDE0;font-weight:500;\">{fecha}</strong>"
+        "</span>"
+    ) if fecha else ""
     st.markdown(f"""
     <div style="
         background:#1B3A2D;
