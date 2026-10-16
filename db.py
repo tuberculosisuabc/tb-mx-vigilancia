@@ -194,11 +194,14 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
         WHERE m.variant_class = 'dr_variant'
           AND m.gene IS NOT NULL AND m.gene <> ''
           AND (size($drugs) = 0 OR m.drug IN $drugs)
-        WITH m, count(s) AS sample_count
-        RETURN m.gene AS gene,
-               CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
-               m.drug AS drug, m.confidence AS confidence,
-               sample_count
+        // Una misma mutación puede conferir resistencia a varios fármacos (un nodo
+        // Mutation por fármaco); se agrupan para mostrar una sola barra por mutación
+        WITH m.gene AS gene,
+             CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
+             collect(DISTINCT m.drug)       AS drugs,
+             collect(DISTINCT m.confidence) AS confidences,
+             count(DISTINCT s)              AS sample_count
+        RETURN gene, change, drugs, confidences, sample_count
         ORDER BY sample_count DESC
         LIMIT $limit
     """, {"limit": limit, "drugs": list(drugs)})
