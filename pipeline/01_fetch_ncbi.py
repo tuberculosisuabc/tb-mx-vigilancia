@@ -92,19 +92,26 @@ def extract_state(geo_loc_name):
             return state, *STATE_COORDS[state]
     return "", None, None
 
+# Columns used later by the pipeline: never dropped as "similar" duplicates
+KEY_COLUMNS = {"BioSampleID", "Run", "geo_loc_name", "collection_date",
+               "isolation_source", "host", "spots", "BioProject_x", "BioProject_y"}
+
 def drop_similar_columns(df, threshold=0.8):
     cols, drop = df.columns.tolist(), set()
     for i in range(len(cols)):
         for j in range(i+1, len(cols)):
             c1, c2 = cols[i], cols[j]
             if c1 in drop or c2 in drop: continue
+            if c1 in KEY_COLUMNS and c2 in KEY_COLUMNS: continue
             if difflib.SequenceMatcher(None, c1.lower(), c2.lower()).ratio() < threshold:
                 continue
             s1, s2 = df[c1], df[c2]
             if not (pd.api.types.is_numeric_dtype(s1) and pd.api.types.is_numeric_dtype(s2)):
                 match_frac = ((s1==s2)|(s1.isna()&s2.isna())).sum()/len(df)
                 if match_frac > 0.95:
-                    drop.add(c1 if s1.isna().sum() >= s2.isna().sum() else c2)
+                    if c1 in KEY_COLUMNS:   drop.add(c2)   # keep the column the pipeline uses
+                    elif c2 in KEY_COLUMNS: drop.add(c1)
+                    else: drop.add(c1 if s1.isna().sum() >= s2.isna().sum() else c2)
     return df.drop(columns=list(drop))
 
 # STEP 1: Load original run results
@@ -226,6 +233,17 @@ if "LibraryStrategy" in merged.columns:
     merged = merged[merged["LibraryStrategy"]=="WGS"]
 if "spots" in merged.columns:
     merged = merged[pd.to_numeric(merged["spots"], errors="coerce").fillna(0) > 0]
+
+# Exclude laboratory reference strains (H37Rv / H37Ra) and in-vitro experiments:
+# they are not clinical isolates and must not enter surveillance statistics
+lab_mask = pd.Series(False, index=merged.index)
+if "ScientificName" in merged.columns:
+    lab_mask |= merged["ScientificName"].fillna("").str.contains(r"H37R[va]", case=False)
+if "isolation_source" in merged.columns:
+    lab_mask |= merged["isolation_source"].fillna("").str.contains(r"in vitro|laboratory", case=False)
+if lab_mask.any():
+    log(f"  Excluidos {int(lab_mask.sum())} runs de cepas de laboratorio / cultivo in vitro")
+    merged = merged[~lab_mask]
 
 # Eliminar runs ya existentes
 if "Run" in merged.columns:
