@@ -33,6 +33,7 @@ lineage_colors = {
     "lineage6": "#f87171",
     "La1":      "#F54927",
     "La2":      "#e879f9",
+    "Mixta":    "#94a3b8",
 }
 
 # ── Main distribution ─────────────────────────────────────────────────
@@ -40,15 +41,22 @@ st.markdown("<div class='section-header'>Distribución Global</div>", unsafe_all
 
 lin_data = get_lineage_dist()
 df_lin = pd.DataFrame(lin_data)
+df_lin = df_lin[df_lin["count"].fillna(0) > 0].copy()
+df_lin["description"] = df_lin["description"].where(
+    df_lin["description"].fillna("") != "", df_lin["lineage"])
+# Las infecciones mixtas ("lineage2;lineage4") se muestran como una sola categoría
 df_lin["lineage"] = df_lin["lineage"].apply(
-    lambda x: x.split(";")[0] if isinstance(x, str) and ";" in x else x
+    lambda x: "Mixta" if isinstance(x, str) and ";" in x else x
 )
-df_lin = df_lin.groupby("lineage", as_index=False).agg({"count": "sum"})
-
-if "description" not in df_lin.columns:
-    df_lin["description"] = df_lin["lineage"]
-if "sub_lineages" not in df_lin.columns:
-    df_lin["sub_lineages"] = "N/A"
+df_lin["sub_lineages"] = df_lin["sub_lineages"].apply(
+    lambda subs: sorted(s for s in subs if s) if isinstance(subs, list) else []
+)
+df_lin = (df_lin.groupby("lineage", as_index=False)
+          .agg(count=("count", "sum"),
+               description=("description", "first"),
+               sub_lineages=("sub_lineages", lambda x: sorted({s for subs in x for s in subs})))
+          .sort_values("count", ascending=False))
+df_lin["sub_lineages"] = df_lin["sub_lineages"].apply(lambda subs: ", ".join(subs) or "—")
 
 col1, col2 = st.columns(2)
 
