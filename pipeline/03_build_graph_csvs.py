@@ -53,8 +53,14 @@ all_data  = {}   # use for clustering
 new_data  = {}   # for new nodes/relantionships
 
 corrupt = []
+# Only runs listed in metadata_cleaned.csv are used (e.g. removed lab-strain runs
+# whose JSONs are still in an older release are ignored)
+known_runs = set(pd.read_csv(METADATA_CSV, dtype=str, usecols=["Run"])["Run"].dropna().str.strip())
+
 for jf in all_json_files:
     sid = jf.name.replace(".results.json", "")
+    if sid not in known_runs:
+        continue
     try:
         with open(jf) as f:
             d = json.load(f)
