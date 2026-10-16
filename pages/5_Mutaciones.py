@@ -5,6 +5,7 @@ import pandas as pd
 import math
 from db import get_top_dr_mutations, get_mutation_network
 from utils import render_topnav, render_footer, render_sample_size
+from utils import DRUG_COLORS, MULTI_DRUG_COLOR, confidence_es, drug_es
 
 st.set_page_config(
     page_title="Mutaciones · SVG-TB-MX",
@@ -18,31 +19,12 @@ render_topnav("Mutaciones")
 # ── Header ────────────────────────────────────────────────────────────
 st.markdown("""
     <h1>Mutaciones de Resistencia</h1>
-    <p style='color:#4a6278;font-size:1.05rem;line-height:1.7'>
+    <p style='color:#3D5A4D;font-size:1.05rem;line-height:1.7'>
         Variantes genómicas que confieren resistencia a antibióticos anti-TB.
     </p>
 """, unsafe_allow_html=True)
 
 render_sample_size()
-
-drug_colors = {
-    "isoniazid":    "#f87171",
-    "rifampicin":   "#fb923c",
-    "ethambutol":   "#fbbf24",
-    "pyrazinamide": "#a3e635",
-    "streptomycin": "#34d399",
-    "moxifloxacin": "#22d3ee",
-    "levofloxacin": "#60a5fa",
-    "bedaquiline":  "#a78bfa",
-    "linezolid":    "#e879f9",
-    "amikacin":     "#f472b6",
-    "kanamycin":    "#fb7185",
-    "capreomycin":  "#c084fc",
-    "ethionamide":  "#86efac",
-    "clofazimine":  "#7dd3fc",
-    "delamanid":    "#fda4af",
-    "para-aminosalicylic_acid": "#fcd34d",
-}
 
 # ── Controls ──────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns([1, 1, 3])
@@ -51,12 +33,14 @@ with col1:
 with col2:
     drug_filter = st.multiselect(
         "Filtrar por fármaco",
-        options=list(drug_colors.keys()),
+        options=list(DRUG_COLORS.keys()),
         default=[],
+        format_func=drug_es,
+        placeholder="Todos los fármacos",
     )
 
 # ── Top mutations bar chart ───────────────────────────────────────────
-st.markdown("<div class='section-header'>Mutaciones Más Frecuentes</div>", unsafe_allow_html=True)
+st.markdown("<div class='section-header'>Mutaciones más frecuentes</div>", unsafe_allow_html=True)
 
 # El filtro de fármaco se aplica en la consulta, así el top N es el de esos fármacos
 with st.spinner("Cargando mutaciones..."):
@@ -68,7 +52,12 @@ if df_mut.empty:
     st.info("No hay mutaciones de resistencia para los fármacos seleccionados.")
 else:
     df_mut["label"] = df_mut["gene"] + " " + df_mut["change"].fillna("")
-    df_mut["color"] = df_mut["drug"].map(drug_colors).fillna("#64748b")
+    df_mut["drug"] = df_mut["drugs"].apply(lambda d: ", ".join(sorted(drug_es(x) for x in d)))
+    df_mut["confidence"] = df_mut["confidences"].apply(
+        lambda c: ", ".join(sorted({confidence_es(x) for x in c})))
+    # Color del fármaco; gris si la mutación confiere resistencia a varios
+    df_mut["color"] = df_mut["drugs"].apply(
+        lambda d: DRUG_COLORS.get(d[0], "#64748b") if len(d) == 1 else MULTI_DRUG_COLOR)
 
     fig = go.Figure(go.Bar(
         y=df_mut["label"],
@@ -80,7 +69,7 @@ else:
         textfont=dict(color="#3D5A4D", size=10),
         customdata=df_mut[["drug", "confidence"]].values,
         hovertemplate=(
-            "<b>%{y}</b><br>Fármaco: %{customdata[0]}<br>"
+            "<b>%{y}</b><br>Fármaco(s): %{customdata[0]}<br>"
             "Confianza: %{customdata[1]}<br>Muestras: %{x}<extra></extra>"
         ),
     ))
@@ -88,22 +77,27 @@ else:
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#3D5A4D", family="Poppins"),
-        xaxis=dict(showgrid=True, gridcolor="#D5D0C4", color="#4a6278", title="Número de muestras"),
+        xaxis=dict(showgrid=True, gridcolor="#D5D0C4", color="#3D5A4D", title="Número de muestras"),
         yaxis=dict(showgrid=False, color="#3D5A4D", autorange="reversed"),
         margin=dict(t=10, b=40, l=10, r=60),
         height=max(350, top_n * 22),
     )
     st.plotly_chart(fig, use_container_width=True)
+    st.caption("Barras en gris: mutaciones que confieren resistencia a más de un fármaco "
+               "(el detalle aparece al pasar el cursor).")
 
 # ── Mutation-Drug network ─────────────────────────────────────────────
-st.markdown("<div class='section-header'>Red Mutación → Fármaco</div>", unsafe_allow_html=True)
-st.caption("Cada nodo representa una mutación o fármaco. El tamaño indica el número de muestras.")
+st.markdown("<div class='section-header'>Red gen → fármaco</div>", unsafe_allow_html=True)
+st.caption("Cada círculo es un gen y cada rombo un fármaco; el tamaño indica el número de muestras.")
 
 min_s = st.slider("Mínimo de muestras para mostrar mutación", 1, 20, 5)
 net_data = get_mutation_network(min_samples=min_s)
 df_net = pd.DataFrame(net_data)
 
 if not df_net.empty:
+    df_net["color"] = df_net["drug"].map(DRUG_COLORS).fillna("#64748b")
+    df_net["drug"]  = df_net["drug"].map(drug_es)
+    drug_color = dict(zip(df_net["drug"], df_net["color"]))
     genes = df_net["gene"].unique().tolist()
     drugs = df_net["drug"].unique().tolist()
 
@@ -157,7 +151,7 @@ if not df_net.empty:
         textfont=dict(color="#1B3A2D", size=10),
         marker=dict(
             size=[max(12, min(45, drug_counts.get(d, 1) ** 0.5 * 4)) for d in drugs],
-            color=[drug_colors.get(d, "#64748b") for d in drugs],
+            color=[drug_color.get(d, "#64748b") for d in drugs],
             line=dict(color="#F4F1EA", width=1),
             symbol="diamond",
         ),
@@ -208,8 +202,8 @@ if not df_mut.empty:
     with st.expander("Ver tabla completa de mutaciones de resistencia"):
         st.dataframe(
             df_mut[["label", "drug", "confidence", "sample_count"]].rename(columns={
-                "label": "Mutación", "drug": "Fármaco",
-                "confidence": "Confianza (TB-Profiler)", "sample_count": "Muestras",
+                "label": "Mutación", "drug": "Fármaco(s)",
+                "confidence": "Confianza (catálogo OMS / TB-Profiler)", "sample_count": "Muestras",
             }),
             use_container_width=True, hide_index=True,
         )
