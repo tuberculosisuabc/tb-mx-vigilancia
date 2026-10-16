@@ -4,6 +4,7 @@ import plotly.graph_objects as go
 import pandas as pd
 from db import get_lineage_dist
 from utils import render_topnav, render_footer, render_sample_size
+from utils import LINEAGE_COLORS, LINEAGE_DESCRIPTIONS, lineage_es, sublineage_es
 
 st.set_page_config(
     page_title="Linajes · SVG-TB-MX",
@@ -17,24 +18,13 @@ render_topnav("Linajes")
 # ── Header ────────────────────────────────────────────────────────────
 st.markdown("""
     <h1>Distribución de Linajes</h1>
-    <p style='color:#4a6278;font-size:1.05rem;line-height:1.7'>
-        Filogenia y distribución geográfica de linajes de <i>M. tuberculosis</i> en México.
+    <p style='color:#3D5A4D;font-size:1.05rem;line-height:1.7'>
+        Linajes y sub-linajes de <i>M. tuberculosis</i> identificados con TB-Profiler en los genomas con QC aprobado.
     </p>
 """, unsafe_allow_html=True)
 
 render_sample_size()
 
-lineage_colors = {
-    "lineage1": "#A327F5",
-    "lineage2": "#f59e0b",
-    "lineage3": "#22c55e",
-    "lineage4": "#2D6A4F",
-    "lineage5": "#a78bfa",
-    "lineage6": "#f87171",
-    "La1":      "#F54927",
-    "La2":      "#e879f9",
-    "Mixta":    "#94a3b8",
-}
 
 # ── Main distribution ─────────────────────────────────────────────────
 st.markdown("<div class='section-header'>Distribución Global</div>", unsafe_allow_html=True)
@@ -42,20 +32,17 @@ st.markdown("<div class='section-header'>Distribución Global</div>", unsafe_all
 lin_data = get_lineage_dist()
 df_lin = pd.DataFrame(lin_data)
 df_lin = df_lin[df_lin["count"].fillna(0) > 0].copy()
-df_lin["description"] = df_lin["description"].where(
-    df_lin["description"].fillna("") != "", df_lin["lineage"])
-# Las infecciones mixtas ("lineage2;lineage4") se muestran como una sola categoría
-df_lin["lineage"] = df_lin["lineage"].apply(
-    lambda x: "Mixta" if isinstance(x, str) and ";" in x else x
-)
+# Nombres y descripciones en español (theme.py); las infecciones mixtas
+# ("lineage2;lineage4") se agrupan en una sola categoría
+df_lin["lineage"] = df_lin["lineage"].map(lineage_es)
 df_lin["sub_lineages"] = df_lin["sub_lineages"].apply(
-    lambda subs: sorted(s for s in subs if s) if isinstance(subs, list) else []
+    lambda subs: [sublineage_es(s) for s in subs if s] if isinstance(subs, list) else []
 )
 df_lin = (df_lin.groupby("lineage", as_index=False)
           .agg(count=("count", "sum"),
-               description=("description", "first"),
                sub_lineages=("sub_lineages", lambda x: sorted({s for subs in x for s in subs})))
           .sort_values("count", ascending=False))
+df_lin["description"] = df_lin["lineage"].map(LINEAGE_DESCRIPTIONS).fillna(df_lin["lineage"])
 df_lin["sub_lineages"] = df_lin["sub_lineages"].apply(lambda subs: ", ".join(subs) or "—")
 
 col1, col2 = st.columns(2)
@@ -63,7 +50,7 @@ col1, col2 = st.columns(2)
 with col1:
     fig_donut = px.pie(
         df_lin, values="count", names="lineage",
-        color="lineage", color_discrete_map=lineage_colors,
+        color="lineage", color_discrete_map=LINEAGE_COLORS,
         hole=0.55,
         custom_data=["description"],
     )
@@ -91,7 +78,7 @@ with col2:
         y=df_lin["lineage"],
         x=df_lin["count"],
         orientation="h",
-        marker_color=[lineage_colors.get(l, "#64748b") for l in df_lin["lineage"]],
+        marker_color=[LINEAGE_COLORS.get(l, "#64748b") for l in df_lin["lineage"]],
         text=df_lin["count"],
         textposition="outside",
         textfont=dict(color="#3D5A4D", size=11),
@@ -105,7 +92,7 @@ with col2:
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#3D5A4D", family="Poppins"),
-        xaxis=dict(showgrid=True, gridcolor="#D5D0C4", color="#4a6278"),
+        xaxis=dict(showgrid=True, gridcolor="#D5D0C4", color="#3D5A4D"),
         yaxis=dict(showgrid=False, color="#3D5A4D", autorange="reversed"),
         margin=dict(t=10, b=10, l=10, r=60),
         height=320,
