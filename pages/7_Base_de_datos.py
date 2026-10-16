@@ -1,33 +1,23 @@
-import streamlit as st
-from utils import render_topnav, render_footer
 import pandas as pd
+import streamlit as st
 
-st.set_page_config(
-    page_title="Base de datos · SVG-TB-MX",
-    page_icon="🫁",
-    layout="wide",
-    initial_sidebar_state="collapsed",
+from db import get_driver, query as run_query
+from utils import page_header, render_footer, section, setup_page
+
+setup_page("Base de datos")
+
+page_header(
+    "Base de Datos",
+    """Grafo de vigilancia genómica de <em>Mycobacterium tuberculosis</em> en México, alojado en Neo4j AuraDB.
+    Neo4j es una base de datos de grafos que usa el lenguaje Cypher para consultar y visualizar datos.
+    Permite hacer consultas avanzadas sin descargar nada, a través de su navegador público.""",
+    sample_size=False,
 )
 
-render_topnav("Base de datos")
-
-# ── Header ────────────────────────────────────────────────────────────
-st.markdown("""
-    <h1>Base de Datos</h1>
-    <p style='color:#3D5A4D;font-size:1.05rem;line-height:1.7'>
-        Grafo de vigilancia genómica de <em>Mycobacterium tuberculosis</em> en México, alojado en Neo4j AuraDB.
-        Neo4j es una base de datos de grafos que usa el lenguaje Cypher para consultar y visualizar datos.
-        Permite hacer consultas avanzadas sin descargar nada, a través de su navegador público.
-    </p>
-""", unsafe_allow_html=True)
-
-# ── Neo4j connection (shared from db.py) ──────────────────────────────
-from db import get_driver
 
 @st.cache_data(ttl=3600)
 def fetch_stats():
-    driver = get_driver()
-    with driver.session() as s:
+    with get_driver().session() as s:
         total_nodes = s.run("MATCH (n) RETURN count(n) AS c").single()["c"]
         total_rels  = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
         rel_types   = s.run("CALL db.relationshipTypes() YIELD relationshipType RETURN count(relationshipType) AS c").single()["c"]
@@ -40,8 +30,8 @@ def fetch_stats():
     }
 
 
-# ── Stats ─────────────────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Resumen</div>", unsafe_allow_html=True)
+# ── Resumen ─────────────────────────────────────────────────────────
+section("Resumen")
 
 try:
     stats = fetch_stats()
@@ -60,8 +50,8 @@ try:
 except Exception as e:
     st.warning(f"No se pudo conectar a Neo4j: {e}")
 
-# ── Nodes table ───────────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Nodos y propiedades</div>", unsafe_allow_html=True)
+# ── Tabla de nodos ───────────────────────────────────────────────────
+section("Nodos y propiedades")
 
 # Esquema tal como lo crea pipeline/04_load_neo4j.py
 nodes_data = pd.DataFrame([
@@ -86,8 +76,8 @@ st.dataframe(
     }
 )
 
-# ── Relationships table ───────────────────────────────────────────────
-st.markdown("<div class='section-header'>Relaciones</div>", unsafe_allow_html=True)
+# ── Tabla de relaciones ──────────────────────────────────────────────
+section("Relaciones")
 
 rels_data = pd.DataFrame([
     ("BioSample", "[:HAS_RUN]",            "SRARun",     "—"),
@@ -113,12 +103,11 @@ st.dataframe(
     }
 )
 
-# ── Neo4j Cypher ──────────────────────────────────────────────
-st.markdown("<div class='section-header'>Explorar a través de Neo4j Cypher</div>", 
-            unsafe_allow_html=True)
+# ── Consola Cypher ───────────────────────────────────────────────────
+section("Explorar a través de Neo4j Cypher")
 
 st.markdown("""
-<p style='color:#3D5A4D;font-size:0.9rem;line-height:1.7'>
+<p class='texto' style='font-size:0.9rem'>
     Escribe una consulta Cypher de solo lectura (<code>MATCH</code>) 
     para explorar el grafo directamente.
 </p>
@@ -149,7 +138,6 @@ with col_info:
 
 if run_btn and user_query.strip():
     try:
-        from db import query as run_query
         with st.spinner("Ejecutando..."):
             results = run_query(user_query)
         if results:
@@ -164,8 +152,8 @@ if run_btn and user_query.strip():
 st.markdown("")
 st.link_button("Conoce más sobre Neo4j →", "https://neo4j.com/", type="secondary")
 
-# ── Ejemplos de consultas Cypher ───────────────────────────────────────
-st.markdown("<div class='section-header'>Ejemplos de consultas Cypher</div>", unsafe_allow_html=True)
+# ── Ejemplos de consultas Cypher ─────────────────────────────────────
+section("Ejemplos de consultas Cypher")
 
 q1, q2 = st.columns(2)
 with q1:
