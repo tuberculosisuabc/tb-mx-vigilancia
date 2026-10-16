@@ -266,7 +266,7 @@ def get_last_pipeline_run() -> str:
         if not runs:
             return ""
         last = datetime.strptime(runs[0]["updated_at"][:10], "%Y-%m-%d")
-        return f"{last.day} de {meses[last.month]} de {last.year}"
+        return f"{meses[last.month]} {last.year}"
     except Exception:
         return ""
 
