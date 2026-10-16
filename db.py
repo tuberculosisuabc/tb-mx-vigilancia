@@ -1,8 +1,10 @@
+import re
+
 import streamlit as st
 from neo4j import GraphDatabase
 
 
-# ── Connection (cached for the whole session) ─────────────────────────
+# ── Conexión (en caché durante toda la sesión) ────────────────────────
 @st.cache_resource
 def get_driver():
     return GraphDatabase.driver(
@@ -11,25 +13,30 @@ def get_driver():
     )
 
 
-# ── Safe read-only query wrapper ──────────────────────────────────────
-_FORBIDDEN = {"CREATE", "MERGE", "DELETE", "SET", "REMOVE",
-              "DROP", "DETACH", "CALL", "LOAD"}
+# ── Consultas de solo lectura ─────────────────────────────────────────
+# La protección real es execute_read: Neo4j rechaza cualquier escritura dentro
+# de una transacción de lectura. La lista de palabras solo sirve para mostrar
+# un mensaje claro antes de enviar la consulta.
+_FORBIDDEN = re.compile(
+    r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD|CALL|FOREACH)\b",
+    re.IGNORECASE,
+)
+
 
 def query(cypher: str, params: dict = None) -> list[dict]:
-    """Run a read-only query and return list of dicts.
-    Raises ValueError if a write keyword is detected."""
-    upper = cypher.upper()
-    for word in _FORBIDDEN:
-        if word in upper.split():
-            raise ValueError(f"Write operation not allowed: {word}")
-    driver = get_driver()
-    with driver.session() as session:
-        result = session.run(cypher, params or {})
-        return [dict(r) for r in result]
+    """Ejecuta una consulta de solo lectura y devuelve una lista de diccionarios.
+    Lanza ValueError si la consulta contiene una operación de escritura."""
+    found = _FORBIDDEN.search(cypher)
+    if found:
+        raise ValueError(f"Operación de escritura no permitida: {found.group(1).upper()}")
+    with get_driver().session() as session:
+        return session.execute_read(
+            lambda tx: [dict(r) for r in tx.run(cypher, params or {})]
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════
-# OVERVIEW — KPI cards & funnel
+# RESUMEN — tarjetas KPI y embudo
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_kpis() -> dict:
@@ -94,7 +101,7 @@ def get_data_overview() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# MDR TREND
+# TENDENCIA MDR (los conteos por año ya usan solo genomas con QC aprobado)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_mdr_trend() -> list[dict]:
@@ -108,14 +115,17 @@ def get_mdr_trend() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# LINEAGE
+# LINAJES
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_lineage_dist() -> list[dict]:
     return query("""
         MATCH (l:Lineage)
+        OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
+        WITH l, collect(DISTINCT s.sub_lineage) AS subs
         RETURN l.lineage_id AS lineage, l.sample_count AS count,
-               l.top_level AS top_level, l.description AS description
+               l.top_level AS top_level, l.description AS description,
+               subs AS sub_lineages
         ORDER BY count DESC
     """)
 
@@ -123,7 +133,7 @@ def get_lineage_dist() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_lineage_by_year() -> list[dict]:
     return query("""
-        MATCH (s:SRARun)-[:BELONGS_TO]->(lin:Lineage),
+        MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(lin:Lineage),
               (s)-[:DETECTED_IN]->(t:TimePoint)
         RETURN t.year AS year, lin.top_level AS lineage, count(s) AS n
         ORDER BY year, n DESC
@@ -131,12 +141,12 @@ def get_lineage_by_year() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# MAP — cases by state
+# MAPA — casos por estado (solo genomas con QC aprobado)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_cases_by_state() -> list[dict]:
     return query("""
-        MATCH (s:SRARun)-[:COLLECTED_IN]->(l:Location)
+        MATCH (s:SRARun {qc_pass: 'PASS'})-[:COLLECTED_IN]->(l:Location)
         WHERE l.state <> ''
         RETURN l.state AS state,
                count(s) AS total,
@@ -149,7 +159,7 @@ def get_cases_by_state() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# RESISTANCE / DRUGS
+# RESISTENCIA / FÁRMACOS
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_resistance_profile() -> list[dict]:
@@ -173,28 +183,30 @@ def get_drug_resistance_counts() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# MUTATIONS
+# MUTACIONES
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
-def get_top_dr_mutations(limit: int = 20) -> list[dict]:
+def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
+    """Mutaciones de resistencia más frecuentes. Si se indican fármacos, el top N
+    se calcula solo entre las mutaciones asociadas a esos fármacos."""
     return query("""
-        MATCH (s:SRARun)-[r:HAS_MUTATION]->(m:Mutation)
+        MATCH (s:SRARun)-[:HAS_MUTATION]->(m:Mutation)
         WHERE m.variant_class = 'dr_variant'
           AND m.gene IS NOT NULL AND m.gene <> ''
-        RETURN m.gene AS gene, m.aa_change AS aa_change,
-               m.drug AS drug, m.who_confidence AS who_confidence,
-               count(s) AS sample_count
+          AND (size($drugs) = 0 OR m.drug IN $drugs)
+        WITH m, count(s) AS sample_count
+        RETURN m.gene AS gene,
+               CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
+               m.drug AS drug, m.confidence AS confidence,
+               sample_count
         ORDER BY sample_count DESC
         LIMIT $limit
-    """, {"limit": limit})
+    """, {"limit": limit, "drugs": list(drugs)})
 
 
 @st.cache_data(ttl=3600)
 def get_mutation_network(min_samples: int = 5) -> list[dict]:
-    """
-    Returns nodes + edges for the mutation-drug network.
-    Uses HAS_MUTATION + RESISTANT_TO (actual schema) instead of CONFERS_RESISTANCE.
-    """
+    """Nodos y aristas de la red mutación–fármaco."""
     return query("""
         MATCH (s:SRARun)-[:HAS_MUTATION]->(m:Mutation),
               (s)-[:RESISTANT_TO]->(d:Drug)
@@ -213,7 +225,7 @@ def get_mutation_network(min_samples: int = 5) -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# CLUSTERS
+# GRUPOS DE SIMILITUD (regiones de resistencia, no transmisión)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_clusters() -> list[dict]:
@@ -228,7 +240,7 @@ def get_clusters() -> list[dict]:
 
 
 # ══════════════════════════════════════════════════════════════════════
-# SAMPLES TABLE
+# TABLA DE MUESTRAS
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_samples_table(
@@ -244,7 +256,7 @@ def get_samples_table(
     if drtype_filter:
         where_clauses.append("s.drtype IN $drtypes")
         params["drtypes"] = drtype_filter
-    if state_filter and state_filter != "All":
+    if state_filter and state_filter != "Todos":
         where_clauses.append("l.state = $state")
         params["state"] = state_filter
     if year_filter:
@@ -253,11 +265,15 @@ def get_samples_table(
 
     where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
+    # El WITH es necesario: un WHERE escrito justo después de OPTIONAL MATCH solo
+    # condiciona ese OPTIONAL MATCH y no elimina filas, así que los filtros no se
+    # aplicarían.
     return query(f"""
         MATCH (s:SRARun)
         OPTIONAL MATCH (s)-[:COLLECTED_IN]->(l:Location)
         OPTIONAL MATCH (s)-[:BELONGS_TO]->(lin:Lineage)
         OPTIONAL MATCH (s)-[:DETECTED_IN]->(t:TimePoint)
+        WITH s, l, lin, t
         {where_str}
         RETURN s.run_id           AS sample_id,
                s.drtype           AS drtype,
@@ -267,11 +283,9 @@ def get_samples_table(
                s.is_xdr           AS is_xdr,
                s.resistant_drugs  AS resistant_drugs,
                s.median_depth     AS median_depth,
-               s.host_sex         AS host_sex,
-               s.host_age         AS host_age,
-               s.host_disease     AS host_disease,
                s.isolation_source AS isolation_source,
                l.state            AS state,
+               t.year             AS year,
                s.collection_date  AS collection_date
         ORDER BY s.run_id
         LIMIT 2000
@@ -279,7 +293,7 @@ def get_samples_table(
 
 
 # ══════════════════════════════════════════════════════════════════════
-# FILTERS (for dropdowns)
+# FILTROS (para los menús desplegables)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_states() -> list[str]:
@@ -287,7 +301,7 @@ def get_states() -> list[str]:
         MATCH (l:Location) WHERE l.state <> ''
         RETURN l.state AS state ORDER BY state
     """)
-    return ["All"] + [r["state"] for r in rows]
+    return ["Todos"] + [r["state"] for r in rows]
 
 
 @st.cache_data(ttl=3600)
