@@ -1,18 +1,21 @@
-name: Neo4j Heartbeat
+name: Mantener Neo4j activo
+
+# Consulta la base de datos cada 8 horas para que la instancia gratuita de
+# AuraDB no se pause por inactividad.
 
 on:
   schedule:
-    - cron: '0 */8 * * *' 
+    - cron: '0 */8 * * *'
 
 jobs:
   ping:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Install neo4j driver
+      - name: Instalar driver de Neo4j
         run: pip install neo4j
 
-      - name: Ping Neo4j
+      - name: Consultar Neo4j
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
@@ -27,12 +30,11 @@ jobs:
           password = os.environ["NEO4J_PASSWORD"]
 
           if not uri:
-              raise ValueError("NEO4J_URI secret is empty — check repo secrets")
+              raise ValueError("El secreto NEO4J_URI está vacío - revisar los secretos del repositorio")
 
           driver = GraphDatabase.driver(uri, auth=(user, password))
           with driver.session() as session:
-              result = session.run("MATCH (s:SRARun) RETURN count(s) AS n")
-              n = result.single()["n"]
-              print(f"✅ Neo4j alive — {n} Sample nodes")
+              n = session.run("MATCH (s:SRARun) RETURN count(s) AS n").single()["n"]
+              print(f"Neo4j activo - {n} nodos SRARun")
           driver.close()
           EOF
