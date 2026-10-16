@@ -41,12 +41,13 @@ drug_colors = {
     "ethionamide":  "#86efac",
     "clofazimine":  "#7dd3fc",
     "delamanid":    "#fda4af",
+    "para-aminosalicylic_acid": "#fcd34d",
 }
 
 # ── Controls ──────────────────────────────────────────────────────────
 col1, col2, col3 = st.columns([1, 1, 3])
 with col1:
-    top_n = st.slider("Top N mutaciones", 10, 30, 20)
+    top_n = st.slider("Mutaciones a mostrar", 10, 30, 20)
 with col2:
     drug_filter = st.multiselect(
         "Filtrar por fármaco",
@@ -57,15 +58,16 @@ with col2:
 # ── Top mutations bar chart ───────────────────────────────────────────
 st.markdown("<div class='section-header'>Mutaciones Más Frecuentes</div>", unsafe_allow_html=True)
 
+# El filtro de fármaco se aplica en la consulta, así el top N es el de esos fármacos
 with st.spinner("Cargando mutaciones..."):
-    mut_data = get_top_dr_mutations(limit=top_n)
+    mut_data = get_top_dr_mutations(limit=top_n, drugs=tuple(sorted(drug_filter)))
 
 df_mut = pd.DataFrame(mut_data)
-if drug_filter:
-    df_mut = df_mut[df_mut["drug"].isin(drug_filter)]
 
-if not df_mut.empty:
-    df_mut["label"] = df_mut["gene"] + " " + df_mut["aa_change"].fillna("")
+if df_mut.empty:
+    st.info("No hay mutaciones de resistencia para los fármacos seleccionados.")
+else:
+    df_mut["label"] = df_mut["gene"] + " " + df_mut["change"].fillna("")
     df_mut["color"] = df_mut["drug"].map(drug_colors).fillna("#64748b")
 
     fig = go.Figure(go.Bar(
@@ -76,10 +78,10 @@ if not df_mut.empty:
         text=df_mut["sample_count"],
         textposition="outside",
         textfont=dict(color="#3D5A4D", size=10),
-        customdata=df_mut[["drug", "who_confidence"]].values,
+        customdata=df_mut[["drug", "confidence"]].values,
         hovertemplate=(
             "<b>%{y}</b><br>Fármaco: %{customdata[0]}<br>"
-            "WHO confidence: %{customdata[1]}<br>Muestras: %{x}<extra></extra>"
+            "Confianza: %{customdata[1]}<br>Muestras: %{x}<extra></extra>"
         ),
     ))
     fig.update_layout(
@@ -176,8 +178,8 @@ if not df_net.empty:
     )
     st.plotly_chart(fig_net, use_container_width=True)
 
-# ── Heatmap ───────────────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Heatmap Gen × Fármaco</div>", unsafe_allow_html=True)
+# ── Mapa de calor ────────────────────────────────────────────────────────
+st.markdown("<div class='section-header'>Mapa de calor gen × fármaco</div>", unsafe_allow_html=True)
 
 if not df_net.empty:
     pivot = df_net.pivot_table(
@@ -202,13 +204,14 @@ if not df_net.empty:
     )
     st.plotly_chart(fig_heat, use_container_width=True)
 
-with st.expander("Ver tabla completa de mutaciones DR"):
-    st.dataframe(
-        df_mut[["label", "drug", "who_confidence", "sample_count"]].rename(columns={
-            "label": "Mutación", "drug": "Fármaco",
-            "who_confidence": "WHO Confidence", "sample_count": "Muestras",
-        }),
-        use_container_width=True, hide_index=True,
-    )
+if not df_mut.empty:
+    with st.expander("Ver tabla completa de mutaciones de resistencia"):
+        st.dataframe(
+            df_mut[["label", "drug", "confidence", "sample_count"]].rename(columns={
+                "label": "Mutación", "drug": "Fármaco",
+                "confidence": "Confianza (TB-Profiler)", "sample_count": "Muestras",
+            }),
+            use_container_width=True, hide_index=True,
+        )
 
 render_footer()
