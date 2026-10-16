@@ -113,7 +113,7 @@ with col_right:
             </tr>
             <tr>
                 <td style='padding:10px 8px;font-weight:600;color:#a855f7'>No-Mtb</td>
-                <td style='padding:10px 8px;color:#4a6278'>Linaje no perteneciente a <i>M. tuberculosis</i> complex</td>
+                <td style='padding:10px 8px;color:#4a6278'><i>M. bovis</i> / BCG: complejo <i>M. tuberculosis</i>, pero no <i>M. tuberculosis</i></td>
             </tr>
         </table>
     </div>
@@ -126,29 +126,29 @@ st.markdown("""
         Número de muestras con al menos una variante de resistencia genotípica para cada fármaco.
         Una misma muestra puede contribuir a múltiples fármacos.</p>
     <p style='color:#4a6278;font-size:1rem;margin-bottom:12px'>
-        El color indica la clase terapéutica según la OMS:
+        El color indica la clasificación de la OMS (2022):
         <span style='color:#f87171'>■</span> Primera línea &nbsp;
-        <span style='color:#fb923c'>■</span> Fluoroquinolonas &nbsp;
         <span style='color:#e879f9'>■</span> Grupo A &nbsp;
         <span style='color:#a78bfa'>■</span> Grupo B &nbsp;
-        <span style='color:#60a5fa'>■</span> Inyectables 2ª línea &nbsp;
-        <span style='color:#f59e0b'>■</span> Inyectables 1ª línea &nbsp;
+        <span style='color:#60a5fa'>■</span> Grupo C &nbsp;
+        <span style='color:#94a3b8'>■</span> Ya no recomendados &nbsp;
         <span style='color:#64748b'>■</span> Otros
     </p>
 """, unsafe_allow_html=True)
 
 drug_data = get_drug_resistance_counts()
 df_drug = pd.DataFrame(drug_data)
+# Clases de la OMS 2022 (las asigna pipeline/03_build_graph_csvs.py)
 class_colors = {
-    "1st_line":            "#f87171",
-    "fluoroquinolone":     "#fb923c",
-    "group_A":             "#e879f9",
-    "group_B":             "#a78bfa",
-    "2nd_line_injectable": "#60a5fa",
-    "1st_line_injectable": "#f59e0b",
-    "other":               "#64748b",
+    "first_line":      "#f87171",
+    "group_A":         "#e879f9",
+    "group_B":         "#a78bfa",
+    "group_C":         "#60a5fa",
+    "not_recommended": "#94a3b8",
+    "bpal_regimen":    "#f59e0b",
+    "other":           "#64748b",
 }
-df_drug["color"] = df_drug["drug_class"].map(class_colors).fillna("#F20707")
+df_drug["color"] = df_drug["drug_class"].map(class_colors).fillna("#64748b")
 
 fig2 = go.Figure(go.Bar(
     x=df_drug["count"],
