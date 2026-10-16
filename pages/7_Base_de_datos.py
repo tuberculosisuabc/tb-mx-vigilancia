@@ -1,166 +1,198 @@
 import streamlit as st
-import plotly.express as px
+from utils import render_topnav, render_footer
 import pandas as pd
-from db import get_samples_table, get_states, get_drtypes, get_years
-from utils import render_topnav, render_footer, render_sample_size
 
 st.set_page_config(
-    page_title="Muestras · SVG-TB-MX",
+    page_title="Base de datos · SVG-TB-MX",
     page_icon="🫁",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-render_topnav("Muestras")
+render_topnav("Base de datos")
 
 # ── Header ────────────────────────────────────────────────────────────
 st.markdown("""
-    <h1>Explorador de Muestras</h1>
-    <p style='color:#4a6278;font-size:1.05rem;line-height:1.7'>
-        Filtra y explora los aislamientos secuenciados.
+    <h1>Base de Datos</h1>
+    <p style='color:#3D5A4D;font-size:1.05rem;line-height:1.7'>
+        Grafo de vigilancia genómica de <em>Mycobacterium tuberculosis</em> en México, alojado en Neo4j AuraDB.
+        Neo4j es una base de datos de grafos que usa el lenguaje Cypher para consultar y visualizar datos.
+        Permite hacer consultas avanzadas sin descargar nada, a través de su navegador público.
     </p>
 """, unsafe_allow_html=True)
 
-render_sample_size()
+# ── Neo4j connection (shared from db.py) ──────────────────────────────
+from db import get_driver
 
-# ── Filters ───────────────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Filtros</div>", unsafe_allow_html=True)
+@st.cache_data(ttl=3600)
+def fetch_stats():
+    driver = get_driver()
+    with driver.session() as s:
+        total_nodes = s.run("MATCH (n) RETURN count(n) AS c").single()["c"]
+        total_rels  = s.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+        rel_types   = s.run("CALL db.relationshipTypes() YIELD relationshipType RETURN count(relationshipType) AS c").single()["c"]
+        node_types  = s.run("CALL db.labels() YIELD label RETURN count(label) AS c").single()["c"]
+    return {
+        "node_types":  f"{node_types:,}",
+        "total_nodes": f"{total_nodes:,}",
+        "rel_types":   f"{rel_types:,}",
+        "total_rels":  f"{total_rels:,}",
+    }
 
-f1, f2, f3, f4 = st.columns(4)
 
-with f1:
-    states    = get_states()
-    state_sel = st.selectbox("Estado", states)
-with f2:
-    drtypes    = get_drtypes()
-    drtype_sel = st.multiselect("Perfil de resistencia", drtypes, default=drtypes)
-with f3:
-    years    = get_years()
-    year_sel = st.selectbox("Año de colección", ["Todos"] + [str(y) for y in years])
-with f4:
-    qc_only = st.checkbox("Solo genomas con QC aprobado", value=True)
+# ── Stats ─────────────────────────────────────────────────────────────
+st.markdown("<div class='section-header'>Resumen</div>", unsafe_allow_html=True)
 
-# ── Data ──────────────────────────────────────────────────────────────
-with st.spinner("Cargando muestras..."):
-    rows = get_samples_table(
-        drtype_filter=drtype_sel if drtype_sel else None,
-        state_filter=state_sel,
-        year_filter=int(year_sel) if year_sel != "Todos" else None,
-        qc_only=qc_only,
-    )
+try:
+    stats = fetch_stats()
+    c1, c2, c3, c4 = st.columns(4)
+    for col, number, label in zip(
+        [c1, c2, c3, c4],
+        [stats["node_types"], stats["total_nodes"], stats["rel_types"], stats["total_rels"]],
+        ["Tipos de nodos", "Nodos totales", "Tipos de relaciones", "Relaciones totales"],
+    ):
+        with col:
+            st.markdown(
+                f"<div class='stat-card'><div class='stat-number'>{number}</div>"
+                f"<div class='stat-label'>{label}</div></div>",
+                unsafe_allow_html=True,
+            )
+except Exception as e:
+    st.warning(f"No se pudo conectar a Neo4j: {e}")
 
-df = pd.DataFrame(rows)
-st.markdown(f"<div class='section-header'>{len(df)} muestras encontradas</div>", unsafe_allow_html=True)
+# ── Nodes table ───────────────────────────────────────────────────────
+st.markdown("<div class='section-header'>Nodos y propiedades</div>", unsafe_allow_html=True)
 
-if df.empty:
-    st.warning("No hay muestras con los filtros seleccionados.")
-    st.stop()
-
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Total",   len(df))
-k2.metric("MDR",     int((df["is_mdr"] == "Yes").sum()))
-k3.metric("XDR",     int((df["is_xdr"] == "Yes").sum()))
-k4.metric("Estados", df["state"].nunique())
-
-drtype_colors = {
-    "Sensitive":    "🟢",
-    "HR-TB":        "🟡",
-    "RR-TB":        "🟠",
-    "MDR-TB":       "🔴",
-    "Pre-XDR-TB":   "🟣",
-    "XDR-TB":       "⚫",
-    "Other":        "⚪",
-    "Low_coverage": "⬜",
-    "No-Mtb":       "🟤",
-}
-df["drtype_icon"] = df["drtype"].map(drtype_colors).fillna("⚪") + " " + df["drtype"].fillna("")
-
-display_cols = {
-    "sample_id":       "ID Muestra",
-    "drtype_icon":     "Resistencia",
-    "lineage":         "Linaje",
-    "sub_lineage":     "Sub-linaje",
-    "state":           "Estado",
-    "year":            "Año",
-    "median_depth":    "Profundidad",
-    "resistant_drugs": "Fármacos resist.",
-}
-df_display = df[list(display_cols.keys())].rename(columns=display_cols)
+# Esquema tal como lo crea pipeline/04_load_neo4j.py
+nodes_data = pd.DataFrame([
+    ("SRARun",     "run_id",        "run_id, spots (int), has_data, lineage, sub_lineage, drtype, is_rr, is_mdr, is_xdr, is_mtb, species, mixed_infection, resistant_drugs, median_depth, pct_mapped, qc_pass, fail_reasons, qc_warnings, num_dr_variants, num_other_variants, collection_date, isolation_source, processing_status, processing_error, tb_profiler_version, db_version"),
+    ("BioSample",  "biosample_id",  "biosample_id"),
+    ("Host",       "host_id",       "host_id, host_type, host_sex, host_age, host_disease"),
+    ("Location",   "state",         "state, country, lat, lon"),
+    ("BioProject", "bioproject_id", "bioproject_id, study_id"),
+    ("Lineage",    "lineage_id",    "lineage_id, top_level, description, sample_count (int)"),
+    ("TimePoint",  "timepoint_id",  "timepoint_id, year, sample_count, mdr_count, mdr_rate, rr_count, rr_rate"),
+    ("Cluster",    "cluster_id",    "cluster_id, size, method, snp_threshold"),
+    ("Drug",       "name",          "name, drug_class"),
+    ("Mutation",   "mutation_id",   "mutation_id, gene, nt_change, aa_change, variant_type, genome_pos, confidence, variant_class, drug"),
+], columns=["Nodo", "Clave (Key)", "Propiedades"])
 
 st.dataframe(
-    df_display,
-    use_container_width=True,
-    hide_index=True,
-    height=480,
+    nodes_data, use_container_width=True, hide_index=True,
     column_config={
-        "ID Muestra":      st.column_config.TextColumn(width="small"),
-        "Resistencia":     st.column_config.TextColumn(width="medium"),
-        "Año":             st.column_config.NumberColumn(format="%d", width="small"),
-        "Profundidad":     st.column_config.NumberColumn(format="%.1f×", width="small"),
-        "Fármacos resist.": st.column_config.TextColumn(width="large"),
+        "Nodo":         st.column_config.TextColumn(width="small"),
+        "Clave (Key)":  st.column_config.TextColumn(width="small"),
+        "Propiedades":  st.column_config.TextColumn(width="large"),
     }
 )
 
-# ── Charts ────────────────────────────────────────────────────────────
-st.markdown("<div class='section-header'>Distribución en Selección Actual</div>", unsafe_allow_html=True)
+# ── Relationships table ───────────────────────────────────────────────
+st.markdown("<div class='section-header'>Relaciones</div>", unsafe_allow_html=True)
 
-ch1, ch2 = st.columns(2)
+rels_data = pd.DataFrame([
+    ("BioSample", "[:HAS_RUN]",            "SRARun",     "—"),
+    ("SRARun",    "[:FROM_HOST]",          "Host",       "—"),
+    ("SRARun",    "[:COLLECTED_IN]",       "Location",   "—"),
+    ("SRARun",    "[:PART_OF]",            "BioProject", "—"),
+    ("SRARun",    "[:BELONGS_TO]",         "Lineage",    "—"),
+    ("SRARun",    "[:DETECTED_IN]",        "TimePoint",  "—"),
+    ("SRARun",    "[:IN_CLUSTER]",         "Cluster",    "—"),
+    ("SRARun",    "[:RESISTANT_TO]",       "Drug",       "confidence"),
+    ("SRARun",    "[:HAS_MUTATION]",       "Mutation",   "allele_freq (float), variant_depth (int), drug, variant_class"),
+    ("Mutation",  "[:CONFERS_RESISTANCE]", "Drug",       "confidence"),
+    ("SRARun",    "[:LINKED_TO]",          "SRARun",     "snp_dist (int, ≤ 12 SNPs en regiones de resistencia)"),
+], columns=["Nodo de Origen", "Relación", "Nodo Final", "Propiedades"])
 
-with ch1:
-    if "drtype" in df.columns:
-        drtype_counts = df["drtype"].value_counts().reset_index()
-        drtype_counts.columns = ["drtype", "count"]
-        fig1 = px.bar(
-            drtype_counts, x="count", y="drtype", orientation="h",
-            color="drtype",
-            color_discrete_map={
-                "Sensitive":    "#22c55e",
-                "HR-TB":        "#facc15",
-                "MDR-TB":       "#f97316",
-                "RR-TB":        "#fb923c",
-                "Pre-XDR-TB":   "#ef4444",
-                "XDR-TB":       "#dc2626",
-                "Other":        "#64748b",
-                "Low_coverage": "#334155",
-            },
-            labels={"count": "Muestras", "drtype": ""},
-        )
-        fig1.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#3D5A4D", family="Poppins"),
-            showlegend=False,
-            xaxis=dict(showgrid=True, gridcolor="#D5D0C4", color="#4a6278"),
-            yaxis=dict(showgrid=False, color="#3D5A4D", autorange="reversed"),
-            margin=dict(t=10, b=10, l=10, r=40),
-            height=260,
-        )
-        st.plotly_chart(fig1, use_container_width=True)
+st.dataframe(
+    rels_data, use_container_width=True, hide_index=True,
+    column_config={
+        "Nodo de Origen": st.column_config.TextColumn(width="small"),
+        "Relación":       st.column_config.TextColumn(width="small"),
+        "Nodo Final":     st.column_config.TextColumn(width="small"),
+        "Propiedades":    st.column_config.TextColumn(width="small"),
+    }
+)
 
-with ch2:
-    if "lineage" in df.columns:
-        lin_counts = df["lineage"].value_counts().reset_index()
-        lin_counts.columns = ["lineage", "count"]
-        lineage_colors = {
-            "lineage1": "#3b82f6", "lineage2": "#f59e0b",
-            "lineage3": "#22c55e", "lineage4": "#2D6A4F",
-            "La1":      "#fb923c", "La2":      "#e879f9",
-        }
-        fig2 = px.pie(
-            lin_counts, values="count", names="lineage",
-            color="lineage", color_discrete_map=lineage_colors,
-            hole=0.5,
-        )
-        fig2.update_traces(
-            textposition="outside", textfont_size=10,
-            marker=dict(line=dict(color="#F4F1EA", width=2)),
-        )
-        fig2.update_layout(
-            paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#3D5A4D", family="Poppins"),
-            legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-            margin=dict(t=10, b=10, l=0, r=0),
-            height=260,
-        )
-        st.plotly_chart(fig2, use_container_width=True)
+# ── Neo4j Cypher ──────────────────────────────────────────────
+st.markdown("<div class='section-header'>Explorar a través de Neo4j Cypher</div>", 
+            unsafe_allow_html=True)
+
+st.markdown("""
+<p style='color:#3D5A4D;font-size:0.9rem;line-height:1.7'>
+    Escribe una consulta Cypher de solo lectura (<code>MATCH</code>) 
+    para explorar el grafo directamente.
+</p>
+""", unsafe_allow_html=True)
+
+default_query = """MATCH (s:SRARun)-[:RESISTANT_TO]->(d:Drug)
+RETURN d.name AS drug, count(s) AS samples
+ORDER BY samples DESC
+LIMIT 10"""
+
+user_query = st.text_area(
+    "Consulta Cypher",
+    value=default_query,
+    height=120,
+    label_visibility="collapsed"
+)
+
+col_run, col_info = st.columns([1, 5])
+with col_run:
+    run_btn = st.button("▶ Ejecutar", type="primary", use_container_width=True)
+with col_info:
+    st.markdown(
+        "<p style='color:#7A9A8A;font-size:0.78rem;padding-top:8px'>"
+        "Solo se permiten consultas de lectura (MATCH). "
+        "Las operaciones de escritura están bloqueadas.</p>",
+        unsafe_allow_html=True
+    )
+
+if run_btn and user_query.strip():
+    try:
+        from db import query as run_query
+        with st.spinner("Ejecutando..."):
+            results = run_query(user_query)
+        if results:
+            st.dataframe(pd.DataFrame(results), use_container_width=True)
+            st.caption(f"{len(results)} resultado(s)")
+        else:
+            st.info("La consulta no devolvió resultados.")
+    except ValueError as e:
+        st.error(f"⛔ Operación no permitida: {e}")
+    except Exception as e:
+        st.error(f"Error en la consulta: {e}")
+st.markdown("")
+st.link_button("Conoce más sobre Neo4j →", "https://neo4j.com/", type="secondary")
+
+# ── Ejemplos de consultas Cypher ───────────────────────────────────────
+st.markdown("<div class='section-header'>Ejemplos de consultas Cypher</div>", unsafe_allow_html=True)
+
+q1, q2 = st.columns(2)
+with q1:
+    st.markdown("**Tendencia MDR por año**")
+    st.code("""MATCH (t:TimePoint)
+WHERE t.sample_count > 0
+RETURN t.year, t.mdr_rate
+ORDER BY t.year""", language="cypher")
+
+    st.markdown("**Linajes en un estado**")
+    st.code("""MATCH (r:SRARun)-[:COLLECTED_IN]->(l:Location {state:'Guerrero'})
+MATCH (r)-[:BELONGS_TO]->(lin:Lineage)
+RETURN lin.lineage_id, count(r) AS n
+ORDER BY n DESC""", language="cypher")
+
+with q2:
+    st.markdown("**Grupos de similitud genotípica (regiones de resistencia)**")
+    st.code("""MATCH (s:SRARun)-[:IN_CLUSTER]->(c:Cluster)
+RETURN c.cluster_id, c.size,
+       sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr
+ORDER BY c.size DESC""", language="cypher")
+    st.caption("Agrupan genomas con genotipos similares en ~70 genes de resistencia; "
+               "no indican transmisión.")
+
+    st.markdown("**Mutaciones más frecuentes**")
+    st.code("""MATCH (r:SRARun)-[:HAS_MUTATION]->(m:Mutation)
+RETURN m.gene, m.aa_change, count(r) AS n
+ORDER BY n DESC LIMIT 10""", language="cypher")
 
 render_footer()
