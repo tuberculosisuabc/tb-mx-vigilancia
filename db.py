@@ -4,7 +4,7 @@ import streamlit as st
 from neo4j import GraphDatabase
 
 
-# ── Conexión (en caché durante toda la sesión) ────────────────────────
+# ── Conexión (en caché durante toda la sesión) ──────────────────────
 @st.cache_resource
 def get_driver():
     return GraphDatabase.driver(
@@ -13,7 +13,7 @@ def get_driver():
     )
 
 
-# ── Consultas de solo lectura ─────────────────────────────────────────
+# ── Consultas de solo lectura ───────────────────────────────────────
 # La protección real es execute_read: Neo4j rechaza cualquier escritura dentro
 # de una transacción de lectura. La lista de palabras solo sirve para mostrar
 # un mensaje claro antes de enviar la consulta.
@@ -96,7 +96,6 @@ def get_data_overview() -> dict:
         "failed_processing": failed_processing,
         "qc_fail"          : s["qc_fail_real"],
         "no_mtb"           : s["no_mtb"],
-        "no_sra"           : bs["total_biosamples"] - total_sra_runs,
     }
 
 
@@ -225,21 +224,6 @@ def get_mutation_network(min_samples: int = 5) -> list[dict]:
                n              AS sample_count
         ORDER BY n DESC
     """, {"min_samples": min_samples})
-
-
-# ══════════════════════════════════════════════════════════════════════
-# GRUPOS DE SIMILITUD (regiones de resistencia, no transmisión)
-# ══════════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=3600)
-def get_clusters() -> list[dict]:
-    return query("""
-        MATCH (s:SRARun)-[:IN_CLUSTER]->(c:Cluster)
-        RETURN c.cluster_id AS cluster_id,
-               c.size       AS size,
-               collect(s.run_id) AS samples,
-               sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr_count
-        ORDER BY size DESC
-    """)
 
 
 # ══════════════════════════════════════════════════════════════════════
