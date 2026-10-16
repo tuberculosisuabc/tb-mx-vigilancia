@@ -13,7 +13,7 @@ render_topnav("Acerca del Proyecto")
 # ── Header ────────────────────────────────────────────────────────────
 st.markdown("""
     <h1>Acerca del Proyecto</h1>
-    <p style='color:#4a6278;font-size:1.05rem;line-height:1.7'>
+    <p style='color:#3D5A4D;font-size:1.05rem;line-height:1.7'>
         Este dashboard forma parte de un esfuerzo colaborativo de vigilancia genómica de
         <i>Mycobacterium tuberculosis</i> en México, desarrollado en el marco del Centro de Investigación,
         Innovación y Vigilancia Genómica de Enfermedades Infecciosas (CIIViGEI) de la Universidad
@@ -24,7 +24,7 @@ st.markdown("""
 # ── Equipo ────────────────────────────────────────────────────────────
 st.markdown("<div class='section-header'>Equipo de Trabajo</div>", unsafe_allow_html=True)
 st.markdown("""
-    <p style='color:#4a6278;font-size:1rem;line-height:1.9'>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:1.9'>
     <b>Dra. Raquel Muñiz-Salazar — Colaboradora Nacional</b><br>
     &nbsp;&nbsp;• Profesora-Investigadora, Escuela de Ciencias de la Salud, UABC<br>
     &nbsp;&nbsp;• Coordinadora de Investigación y Posgrado, ECS-UABC<br>
@@ -33,7 +33,7 @@ st.markdown("""
     &nbsp;&nbsp;• Presidenta de RemiTB
     </p>
 
-    <p style='color:#4a6278;font-size:1rem;line-height:1.9'>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:1.9'>
     <b>Dra. Dora-Luz Flores — Colaboradora Nacional</b><br>
     &nbsp;&nbsp;• Coordinadora General de Investigación y Posgrado, UABC <br>
     &nbsp;&nbsp;• Profesora-Investigadora, Facultad de Ingeniería, Arquitectura y Diseño, UABC <br>
@@ -41,14 +41,14 @@ st.markdown("""
     &nbsp;&nbsp;• Miembro del Liaison Committee of the ISC Regional Focal Point for the LACR
     </p>
 
-    <p style='color:#4a6278;font-size:1rem;line-height:1.9'>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:1.9'>
     <b>Dr. Giuseppe Pirrò — Colaborador Internacional</b><br>
     &nbsp;&nbsp;• Profesor Asociado, Ciencias de la Computación, Università della Calabria, Italia<br>
     &nbsp;&nbsp;• Departamento DEMACS (Ingegneria Informatica, Modellistica, Elettronica e Sistemistica)<br>
     &nbsp;&nbsp;• Áreas: Web Semántica, Bases de datos orientadas a grafos, Knowledge Graphs, Sistemas distribuidos
     </p>
 
-    <p style='color:#4a6278;font-size:1rem;line-height:1.9'>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:1.9'>
     <b>Ing. Daniela Santana Camacho — Desarrollo y análisis de datos</b><br>
     &nbsp;&nbsp;• Bioingeniera, Universidad Autónoma de Baja California<br>
     &nbsp;&nbsp;• Estudiante de posgrado en Biotecnología de la Salud, DiBEST, Università della Calabria, Italia
@@ -58,7 +58,7 @@ st.markdown("""
 # ── Recursos ──────────────────────────────────────────────────────────
 st.markdown("<div class='section-header'>Recursos utilizados</div>", unsafe_allow_html=True)
 st.markdown("""
-    <p style='color:#4a6278;font-size:1rem;line-height:2.2'>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:2.2'>
     • <a href='https://www.ncbi.nlm.nih.gov/' target='_blank' style='color:#2D6A4F;text-decoration:underline;'>NCBI</a>: Recopilación de muestras y genomas<br>
     • <a href='https://github.com/jodyphelan/TBProfiler' target='_blank' style='color:#2D6A4F;text-decoration:underline;'>TB-Profiler</a>: Análisis genómico<br>
     • <a href='https://www.who.int/publications/i/item/9789240082410' target='_blank' style='color:#2D6A4F;text-decoration:underline;'>Catálogo de mutaciones de la OMS</a>: Clasificación de mutaciones y farmacorresistencia<br>
@@ -70,7 +70,7 @@ st.markdown("""
 # ── Disclaimer ────────────────────────────────────────────────────────
 st.markdown("<div class='section-header'>Descargo de Responsabilidad</div>", unsafe_allow_html=True)
 st.markdown("""
-    <p style='color:#4a6278;font-size:1rem;line-height:1.8'>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:1.8'>
     Esta herramienta es exclusivamente para fines de investigación científica. No ha sido aprobada,
     autorizada ni licenciada por ninguna autoridad reguladora. Los datos presentados no deben utilizarse
     como base para diagnóstico clínico, tratamiento de pacientes ni ensayos clínicos en humanos.
