@@ -335,3 +335,204 @@ def render_sample_size():
         </span>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# COLORES Y ETIQUETAS COMPARTIDOS
+# La base de datos guarda los valores en inglés (los genera el pipeline de la
+# tesis); aquí se define una sola vez cómo se muestran en el sitio: el color de
+# cada categoría y su nombre en español, igual en todas las gráficas y tablas.
+# ══════════════════════════════════════════════════════════════════════
+
+# ── Colores de texto del sitio ────────────────────────────────────────
+TEXT_MUTED = "#3D5A4D"     # párrafos y ejes
+TEXT_DARK  = "#1B3A2D"     # títulos y etiquetas
+LINK       = "#2D6A4F"
+GRID       = "#D5D0C4"
+BG         = "#F4F1EA"
+
+
+# ── Perfil de resistencia (drtype de TB-Profiler) ─────────────────────
+# Nomenclatura en español usada por la OMS/OPS: TB-RR, TB-MDR, TB-XDR...
+DRTYPE_LABELS = {
+    "Sensitive":    "Sensible",
+    "HR-TB":        "TB-Hr",
+    "RR-TB":        "TB-RR",
+    "MDR-TB":       "TB-MDR",
+    "Pre-XDR-TB":   "TB-pre-XDR",
+    "XDR-TB":       "TB-XDR",
+    "Other":        "Otra resistencia",
+    "Low_coverage": "Baja cobertura",
+    "No-Mtb":       "M. bovis / BCG",
+}
+# Colores ordenados de menor a mayor resistencia; coinciden con los íconos
+DRTYPE_COLORS = {
+    "Sensible":         "#22c55e",
+    "TB-Hr":            "#eab308",
+    "TB-RR":            "#f97316",
+    "TB-MDR":           "#dc2626",
+    "TB-pre-XDR":       "#9333ea",
+    "TB-XDR":           "#1f2937",
+    "Otra resistencia": "#94a3b8",
+    "Baja cobertura":   "#cbd5e1",
+    "M. bovis / BCG":   "#92400e",
+}
+# Íconos para las tablas (los mismos colores que DRTYPE_COLORS)
+DRTYPE_ICONS = {
+    "Sensible":         "🟢",
+    "TB-Hr":            "🟡",
+    "TB-RR":            "🟠",
+    "TB-MDR":           "🔴",
+    "TB-pre-XDR":       "🟣",
+    "TB-XDR":           "⚫",
+    "Otra resistencia": "⚪",
+    "Baja cobertura":   "⬜",
+    "M. bovis / BCG":   "🟤",
+}
+DRTYPE_DESCRIPTIONS = {
+    "Sensible":         "Sin variantes de resistencia detectadas",
+    "TB-Hr":            "Resistencia a isoniacida, sin resistencia a rifampicina",
+    "TB-RR":            "Resistencia a rifampicina",
+    "TB-MDR":           "Resistencia a rifampicina <b>+</b> isoniacida",
+    "TB-pre-XDR":       "TB-MDR/RR <b>+</b> fluoroquinolona",
+    "TB-XDR":           "TB-pre-XDR <b>+</b> bedaquilina y/o linezolid",
+    "Otra resistencia": "Resistencia a otros fármacos (sin isoniacida ni rifampicina)",
+    "M. bovis / BCG":   "Complejo <i>M. tuberculosis</i>, pero no <i>M. tuberculosis</i>",
+}
+
+
+def drtype_es(value):
+    return DRTYPE_LABELS.get(value, value)
+
+
+# ── Linajes ───────────────────────────────────────────────────────────
+LINEAGE_LABELS = {
+    "lineage1": "L1", "lineage2": "L2", "lineage3": "L3", "lineage4": "L4",
+    "lineage5": "L5", "lineage6": "L6", "lineage7": "L7", "lineage8": "L8",
+    "lineage9": "L9", "La1": "La1", "La2": "La2", "La3": "La3", "mixed": "Mixta",
+}
+LINEAGE_DESCRIPTIONS = {
+    "L1":    "Indo-Oceánico",
+    "L2":    "Asiático oriental / Beijing",
+    "L3":    "Africano oriental-Indio",
+    "L4":    "Euroamericano",
+    "L5":    "Africano occidental 1 (M. africanum)",
+    "L6":    "Africano occidental 2 (M. africanum)",
+    "L7":    "Etíope",
+    "L8":    "Linaje 8",
+    "L9":    "Linaje 9",
+    "La1":   "M. bovis (incluye BCG)",
+    "La2":   "M. caprae",
+    "La3":   "M. orygis",
+    "Mixta": "Infección mixta (más de un linaje detectado)",
+}
+LINEAGE_COLORS = {
+    "L1":    "#7c3aed",
+    "L2":    "#2563eb",
+    "L3":    "#0891b2",
+    "L4":    "#2D6A4F",
+    "L5":    "#ca8a04",
+    "L6":    "#ea580c",
+    "L7":    "#db2777",
+    "La1":   "#92400e",
+    "La2":   "#b45309",
+    "La3":   "#78716c",
+    "Mixta": "#94a3b8",
+}
+
+
+def lineage_es(value):
+    """'lineage4' -> 'L4'; 'lineage2;lineage4' -> 'Mixta'."""
+    if not isinstance(value, str) or not value:
+        return value
+    if ";" in value:
+        return "Mixta"
+    return LINEAGE_LABELS.get(value.split(".")[0], value)
+
+
+def sublineage_es(value):
+    """'lineage4.1.2' -> '4.1.2'; 'La1.8.1' se deja igual."""
+    if not isinstance(value, str):
+        return value
+    return value.replace("lineage", "")
+
+
+# ── Fármacos ──────────────────────────────────────────────────────────
+DRUG_NAMES = {
+    "isoniazid":                "Isoniacida",
+    "rifampicin":               "Rifampicina",
+    "ethambutol":               "Etambutol",
+    "pyrazinamide":             "Pirazinamida",
+    "streptomycin":             "Estreptomicina",
+    "levofloxacin":             "Levofloxacino",
+    "moxifloxacin":             "Moxifloxacino",
+    "bedaquiline":              "Bedaquilina",
+    "linezolid":                "Linezolid",
+    "clofazimine":              "Clofazimina",
+    "delamanid":                "Delamanid",
+    "pretomanid":               "Pretomanid",
+    "amikacin":                 "Amikacina",
+    "kanamycin":                "Kanamicina",
+    "capreomycin":              "Capreomicina",
+    "ethionamide":              "Etionamida",
+    "prothionamide":            "Protionamida",
+    "para-aminosalicylic_acid": "Ácido p-aminosalicílico",
+    "cycloserine":              "Cicloserina",
+}
+DRUG_COLORS = {
+    "isoniazid":                "#f87171",
+    "rifampicin":               "#fb923c",
+    "ethambutol":               "#fbbf24",
+    "pyrazinamide":             "#a3e635",
+    "streptomycin":             "#34d399",
+    "moxifloxacin":             "#22d3ee",
+    "levofloxacin":             "#60a5fa",
+    "bedaquiline":              "#a78bfa",
+    "linezolid":                "#e879f9",
+    "amikacin":                 "#f472b6",
+    "kanamycin":                "#fb7185",
+    "capreomycin":              "#c084fc",
+    "ethionamide":              "#86efac",
+    "clofazimine":              "#7dd3fc",
+    "delamanid":                "#fda4af",
+    "para-aminosalicylic_acid": "#fcd34d",
+}
+MULTI_DRUG_COLOR = "#94a3b8"   # mutaciones asociadas a más de un fármaco
+
+
+def drug_es(value):
+    return DRUG_NAMES.get(value, value)
+
+
+# Clasificación de la OMS 2022 (la asigna pipeline/03_build_graph_csvs.py)
+DRUG_CLASS_LABELS = {
+    "first_line":      "Primera línea",
+    "group_A":         "Grupo A",
+    "group_B":         "Grupo B",
+    "group_C":         "Grupo C",
+    "not_recommended": "Ya no recomendados",
+    "bpal_regimen":    "Régimen BPaL",
+    "other":           "Otros",
+}
+DRUG_CLASS_COLORS = {
+    "first_line":      "#f87171",
+    "group_A":         "#e879f9",
+    "group_B":         "#a78bfa",
+    "group_C":         "#60a5fa",
+    "not_recommended": "#94a3b8",
+    "bpal_regimen":    "#f59e0b",
+    "other":           "#64748b",
+}
+
+
+# ── Confianza de las mutaciones (TB-Profiler / catálogo de la OMS) ────
+CONFIDENCE_LABELS = {
+    "Assoc w R":              "Asociada a resistencia",
+    "Assoc w R - Interim":    "Asociada a resistencia (provisional)",
+    "Uncertain significance": "Significado incierto",
+    "":                       "Sin clasificar (literatura)",
+}
+
+
+def confidence_es(value):
+    return CONFIDENCE_LABELS.get(value, value)
