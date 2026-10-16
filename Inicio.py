@@ -15,26 +15,26 @@ render_topnav("Inicio")
 # ── Header ────────────────────────────────────────────────────────────
 st.markdown("""
     <h1>Tuberculosis en México · Vigilancia Genómica</h1>
-    <p style='color:#4a6278;font-size:1.05rem;margin-bottom:0;line-height:1.7'>
+    <p style='color:#3D5A4D;font-size:1.05rem;margin-bottom:0;line-height:1.7'>
         Sistema de vigilancia genómica de <i>Mycobacterium tuberculosis</i> en México a través de la
         integración de información disponible en
-        <a href="https://www.ncbi.nlm.nih.gov/" target="_blank" style="color:#173b19 ;text-decoration:underline;">NCBI</a>
+        <a href="https://www.ncbi.nlm.nih.gov/" target="_blank" style="color:#2D6A4F;text-decoration:underline;">NCBI</a>
         y la implementación de
-        <a href="https://tbdr.lshtm.ac.uk/" target="_blank" style="color:#173b19 ;text-decoration:underline;">TB Profiler</a>
+        <a href="https://tbdr.lshtm.ac.uk/" target="_blank" style="color:#2D6A4F;text-decoration:underline;">TB-Profiler</a>
         para el análisis genómico. Modelado realizado en 
-        <a href='https://neo4j.com/' target='_blank' style='color:#173b19; text-decoration:underline;'>Neo4j</a> 
+        <a href='https://neo4j.com/' target='_blank' style='color:#2D6A4F; text-decoration:underline;'>Neo4j</a> 
         y desarrollo de página web haciendo uso de 
-        <a href='https://streamlit.io/' target='_blank' style='color:#173b19;text-decoration:underline;'>Streamlit</a>.
+        <a href='https://streamlit.io/' target='_blank' style='color:#2D6A4F;text-decoration:underline;'>Streamlit</a>.
     </p>
 """, unsafe_allow_html=True)
 
 # ── Obtención de datos ────────────────────────────────────────────────
 st.markdown("<div class='section-header'>Obtención y análisis de datos</div>", unsafe_allow_html=True)
 st.markdown("""
-    <p style='color:#4a6278;font-size:1rem;line-height:2'>
-        1. Obtención de datos desde NCBI, aplicando filtros específicos para obtener muestras de Mtb proveniente de México<br>
+    <p style='color:#3D5A4D;font-size:1rem;line-height:2'>
+        1. Obtención de datos desde NCBI, aplicando filtros específicos para obtener muestras de <i>M. tuberculosis</i> provenientes de México<br>
         2. Extracción de metadata relevante y accesos a SRA<br>
-        3. Análisis genómico de SRA disponibles implementando TB Profiler<br>
+        3. Análisis genómico de los runs de SRA disponibles con TB-Profiler<br>
         4. Integración de metadata y resultados como nodos y relaciones para insertar en Neo4j<br>
         5. Análisis y visualización de datos a partir de queries
     </p>
@@ -56,12 +56,12 @@ overview_cards = [
      "Runs analizados con TB-Profiler v6"),
     (ov4, overview["qc_pass"],          "QC aprobado",       "kpi-green",
      "Runs con cobertura y mapeo suficiente"),
-    (ov5, overview["mdr"],              "MDR-TB",            "kpi-amber",
+    (ov5, overview["mdr"],              "TB-MDR",            "kpi-amber",
      "Muestras con resistencia a rifampicina e isoniacida"),
-    (ov6, overview["xdr"],              "XDR-TB",            "kpi-red",
+    (ov6, overview["xdr"],              "TB-XDR",            "kpi-red",
      "Muestras con resistencia extensiva a fármacos"),
-    (ov7, f"{overview['mdr_rate']}%",   "Tasa MDR",          "kpi-amber",
-     "Porcentaje MDR sobre muestras con QC aprobado"),
+    (ov7, f"{overview['mdr_rate']}%",   "Tasa TB-MDR",       "kpi-amber",
+     "Porcentaje de TB-MDR sobre los genomas con QC aprobado"),
 ]
 for col, val, label, klass, tooltip in overview_cards:
     with col:
@@ -108,7 +108,7 @@ with ov_right:
     empty_runs  = overview.get("empty_runs", 0)
     total_runs  = overview["total_sra_runs"]
 
-    labels = ["QC aprobado", "QC rechazado", "No-Mtb", "No procesados", "Runs vacíos"]
+    labels = ["QC aprobado", "QC rechazado", "M. bovis / BCG", "No procesados", "Runs vacíos"]
     values = [qc_pass, qc_fail, no_mtb, failed_proc, empty_runs]
     colors = ["#2D6A4F", "#D4A017", "#8B7355", "#C44B2B", "#B0A898"]
     custom_text = [f"{round(v / total_runs * 100, 1)}%" for v in values]
@@ -135,7 +135,7 @@ with ov_right:
         margin=dict(t=10, b=10, l=10, r=10),
         height=270,
         annotations=[dict(
-            text=f"<b>{total_runs}</b><br>SRA runs",
+            text=f"<b>{total_runs}</b><br>runs de SRA",
             x=0.5, y=0.5, font_size=11, font_color="#1B3A2D",
             showarrow=False,
         )],
@@ -143,10 +143,10 @@ with ov_right:
     st.plotly_chart(qc_fig, use_container_width=True)
 
     st.markdown(f"""
-    <div style='font-size:0.78rem;color:#6b7f93;line-height:1.9;padding:0 8px'>
+    <div style='font-size:0.78rem;color:#5C7A6B;line-height:1.9;padding:0 8px'>
         <b>{empty_runs}</b> ({round(empty_runs/total_runs*100,1)}%) Runs sin datos en SRA (spots = 0)<br>
         <b>{failed_proc}</b> ({round(failed_proc/total_runs*100,1)}%) Runs con error en TB-Profiler<br>
-        <b>{no_mtb}</b> ({round(no_mtb/total_runs*100,1)}%) Runs sin <i>M. tuberculosis</i> confirmado<br>
+        <b>{no_mtb}</b> ({round(no_mtb/total_runs*100,1)}%) Runs de <i>M. bovis</i> / BCG (complejo <i>M. tuberculosis</i>)<br>
         <b>{qc_fail}</b> ({round(qc_fail/total_runs*100,1)}%) Runs con baja cobertura o mapeo insuficiente<br>
         <b>{qc_pass}</b> ({round(qc_pass/total_runs*100,1)}%) Runs con QC aprobado ✓
     </div>
