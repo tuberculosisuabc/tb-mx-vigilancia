@@ -1,8 +1,8 @@
 name: Recargar datos históricos en Neo4j
 
-# Reconstruye el grafo a partir de los resultados históricos de TB-Profiler
-# (release v1.0-data) y de metadata_cleaned.csv. Los nodos existentes se
-# actualizan con MERGE, no se borran.
+# Reconstruye el grafo a partir de los resultados de TB-Profiler del último release
+# de datos y de metadata_cleaned.csv. Los nodos existentes se actualizan con MERGE,
+# no se borran.
 
 on:
   workflow_dispatch:
@@ -14,10 +14,10 @@ jobs:
 
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Configurar Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -25,14 +25,25 @@ jobs:
       - name: Instalar dependencias de Python
         run: pip install neo4j pandas scipy numpy
 
-      - name: Descargar JSONs históricos del release
+      # Mismo criterio que "Actualizar pipeline TB-MX": el release de datos más reciente,
+      # que contiene todos los resultados (históricos + los de cada actualización)
+      - name: Descargar resultados JSON del último release de datos
         run: |
           mkdir -p ~/json_cache
-          gh release download v1.0-data \
+          LATEST_TAG=$(gh release list --repo ${{ github.repository }} \
+            --json tagName,name \
+            --jq '[.[] | select(.tagName | contains("data"))] | .[0].tagName')
+          echo "Usando release: $LATEST_TAG"
+
+          gh release download "$LATEST_TAG" \
             --repo ${{ github.repository }} \
-            --pattern "tb_mx_results_v1.tar.gz" \
+            --pattern "tb_mx_results_*.tar.gz" \
             --dir /tmp/
-          tar -xzf /tmp/tb_mx_results_v1.tar.gz -C ~/json_cache/
+
+          TARFILE=$(ls /tmp/tb_mx_results_*.tar.gz | head -1)
+          tar -xzf "$TARFILE" -C ~/json_cache/ --strip-components=1 2>/dev/null || \
+          tar -xzf "$TARFILE" -C ~/json_cache/
+
           COUNT=$(ls ~/json_cache/*.results.json 2>/dev/null | wc -l)
           echo "JSONs extraídos: $COUNT"
         env:
