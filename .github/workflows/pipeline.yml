@@ -22,12 +22,12 @@ jobs:
     steps:
       # --- 1. Instalar software ---
       - name: Descargar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # TB-Profiler se distribuye por bioconda (no está en PyPI).
       # Bioconda también instala bwa, samtools, bcftools y SRA Toolkit.
       - name: Configurar conda (Miniforge)
-        uses: conda-incubator/setup-miniconda@v3
+        uses: conda-incubator/setup-miniconda@v4
         with:
           miniforge-version: latest
           activate-environment: tbmx
