@@ -1,12 +1,13 @@
 name: Mantener repositorio activo
 
 # GitHub desactiva los workflows programados tras 60 días sin actividad en el
-# repositorio; un commit vacío los mantiene funcionando. También despierta la
-# aplicación de Streamlit.
+# repositorio; un commit vacío semanal los mantiene funcionando. Cada 6 horas
+# además despierta la aplicación de Streamlit (eso no crea commits).
 
 on:
   schedule:
-    - cron: '0 */6 * * *'       # cada 6 horas
+    - cron: '0 */6 * * *'       # cada 6 horas: consultar Streamlit
+    - cron: '30 6 * * 1'        # lunes 06:30 UTC: commit vacío
   workflow_dispatch:
 
 jobs:
@@ -17,9 +18,11 @@ jobs:
 
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v4
+        if: github.event.schedule == '30 6 * * 1' || github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v5
 
       - name: Mantener el repositorio activo
+        if: github.event.schedule == '30 6 * * 1' || github.event_name == 'workflow_dispatch'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
