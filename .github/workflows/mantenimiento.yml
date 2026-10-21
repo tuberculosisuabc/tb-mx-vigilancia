@@ -1,7 +1,7 @@
 name: Mantenimiento/Activar
 on:
   schedule:
-    - cron: '0 */6 * * *'       # cada 6 horas
+    - cron: '00 00 * * *'    #Corre todos los dias a media noche
   workflow_dispatch:            # ejecución manual desde la pestaña Actions
 
 jobs:
