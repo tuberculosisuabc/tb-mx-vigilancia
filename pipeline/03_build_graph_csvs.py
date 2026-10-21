@@ -2,10 +2,20 @@
 """
 Step 3 - Build the CSV files that are loaded into Neo4j.
 
+The graph is centred on BioSample (one node per biological sample). When a
+BioSample has more than one SRA run, only the best run is used:
+  - among runs that pass QC, the one with the highest target median depth;
+  - if none passes QC, the run with the highest depth.
+Runs that are not selected are not loaded into Neo4j (their JSONs stay in the
+GitHub data release).
+
   1. Read the TB-Profiler JSON results (new runs + all historical runs)
-  2. Build sample, mutation and drug nodes and their relationships for the new runs
-  3. Recalculate resistance-region similarity groups with ALL QC-passed runs
-  4. Save the CSV files to neo4j_export/
+  2. Select the best run of every BioSample
+  3. Build BioSample, SRARun, mutation and drug rows for the BioSamples that have
+     a new run (a new run can replace the one selected before)
+  4. Recalculate resistance-region similarity groups with the selected runs of
+     ALL QC-passed BioSamples
+  5. Save the CSV files to neo4j_export/
 
 Usage: python pipeline/03_build_graph_csvs.py
 """
@@ -25,6 +35,7 @@ METADATA_CSV  = Path.home() / "metadata_cleaned.csv"
 JSON_CACHE    = Path.home() / "json_cache"
 OUTPUT_DIR    = Path.home() / "neo4j_export"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
+FAILED_FILE   = Path.home() / "failed_samples.csv"   # written by 02_run_tbprofiler.py
 
 # QC thresholds: a sample passes if target median depth >= MIN_DEPTH (x)
 # and reads mapped >= MIN_PCT_MAPPED (%)
@@ -56,16 +67,40 @@ DRUG_CLASSES = {
     "pretomanid": "bpal_regimen",
 }
 
+# Metadata columns copied to each BioSample row (CSV column -> output column)
+META_COLUMNS = {
+    "state": "state", "lat": "lat", "lon": "lon",
+    "collection_date": "collection_date", "isolation_source": "isolation_source",
+    "host": "host_type", "host_sex": "host_sex", "host_age": "host_age",
+    "host_disease": "host_disease", "SRAStudy": "study_id",
+}
+
 
 # --- Helpers ---
 def log(msg):
     print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
-def passes_qc(data):
+def qc_values(data):
     qc = data.get("qc", {})
-    return (qc.get("target_median_depth", 0) >= MIN_DEPTH
-            and qc.get("percent_reads_mapped", 0) >= MIN_PCT_MAPPED)
+    return qc.get("target_median_depth", 0) or 0, qc.get("percent_reads_mapped", 0) or 0
+
+
+def passes_qc(data):
+    depth, mapped = qc_values(data)
+    return depth >= MIN_DEPTH and mapped >= MIN_PCT_MAPPED
+
+
+def select_best_run(runs, all_data):
+    """Best run of a BioSample: the highest-depth run among those that pass QC;
+    if none passes, the highest-depth run. Ties are broken by % reads mapped,
+    then by run ID so the choice is always the same. None if no run has a result."""
+    candidates = [r for r in runs if r in all_data]
+    if not candidates:
+        return None
+    passing = [r for r in candidates if passes_qc(all_data[r])]
+    pool = passing or candidates
+    return max(pool, key=lambda r: (*qc_values(all_data[r]), r))
 
 
 def mutation_id(df):
@@ -76,11 +111,9 @@ def mutation_id(df):
             df["drug"].fillna("")).str.strip("_")
 
 
-def build_summary_row(run_id, data):
-    """Lineage, resistance profile and QC summary for one run (SRARun node)."""
-    qc      = data.get("qc", {})
-    depth   = qc.get("target_median_depth", 0)
-    mapped  = qc.get("percent_reads_mapped", 0)
+def build_summary(data):
+    """Lineage, resistance profile and QC summary of one TB-Profiler result."""
+    depth, mapped = qc_values(data)
     qc_pass = "PASS" if (depth >= MIN_DEPTH and mapped >= MIN_PCT_MAPPED) else "FAIL"
 
     res_drugs = set()
@@ -112,110 +145,95 @@ def build_summary_row(run_id, data):
     is_mtb  = "No" if (qc_pass == "PASS" and lineage.startswith("La")) else "Yes"
     species = (family if family.startswith("M.") else "M.tuberculosis") if qc_pass == "PASS" else ""
 
-    return {
-        "sample_id"      : run_id,
-        "lineage"        : lineage or "QC_Failed",
-        "sub_lineage"    : data.get("sub_lineage", "QC_Failed") if qc_pass == "PASS" else "QC_Failed",
-        "drtype"         : drtype,
-        "is_rr"          : rr,
-        "is_mdr"         : mdr,
-        "is_xdr"         : xdr,
-        "is_mtb"         : is_mtb,
-        "species"        : species,
-        "mixed_infection": "Yes" if ";" in lineage else "No",
-        "resistant_drugs": "; ".join(sorted(res_drugs)),
-        "median_depth"   : round(depth, 1),
-        "pct_mapped"     : round(mapped, 1),
-        "qc_pass"        : qc_pass,
-    }
-
-
-def build_qc_row(run_id, data):
-    """QC details for one run: failure reasons, warnings and software versions."""
-    qc      = data.get("qc", {})
-    depth   = qc.get("target_median_depth", 0)
-    mapped  = qc.get("percent_reads_mapped", 0)
+    # QC failure reasons and warnings
     reasons = []
     if depth < MIN_DEPTH:
         reasons.append(f"low_depth({depth:.1f}x)")
     if mapped < MIN_PCT_MAPPED:
         reasons.append(f"low_mapping({mapped:.1f}%)")
+    qc = data.get("qc", {})
     warnings = qc.get("qc_notes", qc.get("notes", []))
     if isinstance(warnings, str):
         warnings = [warnings]
+
+    pipeline_info = data.get("pipeline", {})
+    db_version    = pipeline_info.get("db_version", data.get("db_version", "unknown"))
+
     return {
-        "sample_id"               : run_id,
-        "qc_pass"                 : "FAIL" if reasons else "PASS",
-        "fail_reasons"            : " | ".join(reasons) or "None",
-        "median_depth"            : round(depth, 1),
-        "pct_reads_mapped"        : round(mapped, 1),
-        "num_reads_mapped"        : qc.get("num_reads_mapped"),
-        "pct_target_bases_covered": qc.get("target_pct_coverage", qc.get("pct_bases_covered")),
-        "num_dr_variants"         : len(data.get("dr_variants", [])),
-        "num_other_variants"      : len(data.get("other_variants", [])),
-        "qc_warnings"             : " | ".join(warnings) if warnings else "None",
-        "tb_profiler_version"     : data.get("pipeline", {}).get("software_version",
-                                     data.get("software_version", "unknown")),
-        "db_version"              : data.get("pipeline", {}).get("db_version",
-                                     data.get("db_version", "unknown")),
+        "lineage"            : lineage or "QC_Failed",
+        "sub_lineage"        : data.get("sub_lineage", "QC_Failed") if qc_pass == "PASS" else "QC_Failed",
+        "drtype"             : drtype,
+        "is_rr"              : rr,
+        "is_mdr"             : mdr,
+        "is_xdr"             : xdr,
+        "is_mtb"             : is_mtb,
+        "species"            : species,
+        "mixed_infection"    : "Yes" if ";" in lineage else "No",
+        "resistant_drugs"    : "; ".join(sorted(res_drugs)),
+        "median_depth"       : round(depth, 1),
+        "pct_mapped"         : round(mapped, 1),
+        "qc_pass"            : qc_pass,
+        "fail_reasons"       : " | ".join(reasons) or "None",
+        "qc_warnings"        : " | ".join(warnings) if warnings else "None",
+        "num_dr_variants"    : len(data.get("dr_variants", [])),
+        "num_other_variants" : len(data.get("other_variants", [])),
+        "tb_profiler_version": pipeline_info.get("software_version",
+                                                 data.get("software_version", "unknown")),
+        "db_version"         : (db_version.get("commit", str(db_version))
+                                if isinstance(db_version, dict) else db_version),
     }
 
 
-def build_mut_rows(run_id, data):
+def build_mut_rows(biosample_id, run_id, data):
     """One row per variant (and per drug for resistance variants)."""
-    rows   = []
-    qc     = data.get("qc", {})
-    depth  = qc.get("target_median_depth", 0)
-    mapped = qc.get("percent_reads_mapped", 0)
-    lin    = data.get("main_lineage", "")
-    sub    = data.get("sub_lineage", "")
+    rows = []
+    depth, mapped = qc_values(data)
+    lin = data.get("main_lineage", "")
+    sub = data.get("sub_lineage", "")
+
+    def base(var):
+        freq = var.get("freq")
+        return {
+            "biosample_id" : biosample_id,
+            "run_id"       : run_id,
+            "lineage"      : lin, "sub_lineage": sub,
+            "gene"         : var.get("gene_name", ""),
+            "genome_pos"   : var.get("pos"),
+            "nt_change"    : var.get("nucleotide_change", ""),
+            "aa_change"    : var.get("protein_change", ""),
+            "variant_type" : var.get("type", ""),
+            "allele_freq"  : round(freq, 4) if freq else None,
+            "variant_depth": var.get("depth"),
+            "sample_depth" : round(depth, 1),
+            "pct_mapped"   : round(mapped, 1),
+        }
 
     for var in data.get("dr_variants", []):
-        freq = var.get("freq")
         for drug_entry in var.get("drugs", []):
-            rows.append({
-                "sample_id"     : run_id,
-                "lineage"       : lin, "sub_lineage": sub,
-                "gene"          : var.get("gene_name", ""),
-                "genome_pos"    : var.get("pos"),
-                "nt_change"     : var.get("nucleotide_change", ""),
-                "aa_change"     : var.get("protein_change", ""),
-                "variant_type"  : var.get("type", ""),
-                "allele_freq"   : round(freq, 4) if freq else None,
-                "variant_depth" : var.get("depth"),
-                "drug"          : drug_entry.get("drug", ""),
-                "confidence"    : drug_entry.get("confidence", ""),
-                "who_confidence": drug_entry.get("who_confidence", ""),
-                "variant_class" : "dr_variant",
-                "sample_depth"  : round(depth, 1),
-                "pct_mapped"    : round(mapped, 1),
-            })
+            rows.append({**base(var),
+                         "drug"          : drug_entry.get("drug", ""),
+                         "confidence"    : drug_entry.get("confidence", ""),
+                         "who_confidence": drug_entry.get("who_confidence", ""),
+                         "variant_class" : "dr_variant"})
 
     for var in data.get("other_variants", []):
-        freq = var.get("freq")
-        rows.append({
-            "sample_id"     : run_id,
-            "lineage"       : lin, "sub_lineage": sub,
-            "gene"          : var.get("gene_name", ""),
-            "genome_pos"    : var.get("pos"),
-            "nt_change"     : var.get("nucleotide_change", ""),
-            "aa_change"     : var.get("protein_change", ""),
-            "variant_type"  : var.get("type", ""),
-            "allele_freq"   : round(freq, 4) if freq else None,
-            "variant_depth" : var.get("depth"),
-            "drug"          : "",
-            "confidence"    : var.get("confidence", ""),
-            "who_confidence": var.get("who_confidence", ""),
-            "variant_class" : "other_variant",
-            "sample_depth"  : round(depth, 1),
-            "pct_mapped"    : round(mapped, 1),
-        })
+        rows.append({**base(var),
+                     "drug"          : "",
+                     "confidence"    : var.get("confidence", ""),
+                     "who_confidence": var.get("who_confidence", ""),
+                     "variant_class" : "other_variant"})
     return rows
 
 
-def similarity_row(run_id, cluster_id, size):
-    return {"sample_id": run_id, "cluster_id": cluster_id, "cluster_size": size,
+def similarity_row(biosample_id, cluster_id, size):
+    return {"biosample_id": biosample_id, "cluster_id": cluster_id, "cluster_size": size,
             "snp_threshold": SNP_THRESHOLD, "method": CLUSTER_METHOD}
+
+
+def first_value(series):
+    """First non-empty value of a metadata column ('' if there is none)."""
+    values = series[series.fillna("").astype(str).str.strip() != ""]
+    return values.iloc[0] if len(values) else ""
 
 
 # --- Main ---
@@ -223,7 +241,7 @@ def main():
     OUTPUT_DIR.mkdir(exist_ok=True)
     JSON_CACHE.mkdir(exist_ok=True)
 
-    # Step 1: Read new runs and TB-Profiler results
+    # Step 1: New runs, metadata and TB-Profiler results
     if not NEW_RUNS_FILE.exists() or NEW_RUNS_FILE.stat().st_size == 0:
         log("new_runs.txt is empty. No new samples to process.")
         sys.exit(0)
@@ -231,73 +249,114 @@ def main():
     new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
     log(f"New runs to process: {len(new_runs)}")
 
-    # All JSONs (historical + new) are loaded: similarity groups use every run,
-    # nodes and relationships are only built for the new ones.
+    # Metadata: one row per run (the most complete row when a run is duplicated).
+    # Rows without a run (BioSamples with no SRA data) are not part of the graph.
+    df_meta = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
+    df_meta = df_meta[df_meta["Run"].str.strip() != ""].copy()
+    df_meta["Run"] = df_meta["Run"].str.strip()
+    df_meta = (df_meta
+               .assign(_c=(df_meta != "").sum(axis=1))
+               .sort_values("_c", ascending=False)
+               .drop_duplicates(subset="Run")
+               .drop(columns="_c"))
+    runs_by_biosample = df_meta.groupby("BioSampleID")["Run"].apply(list).to_dict()
+    biosample_of_run  = dict(zip(df_meta["Run"], df_meta["BioSampleID"]))
+    meta_by_run       = df_meta.set_index("Run")
+
+    # All JSONs (historical + new) are loaded: the best run of a BioSample may be
+    # an older one, and similarity groups use every BioSample.
     log("Loading JSONs from the local cache...")
     all_json_files = list(JSON_CACHE.glob("*.results.json"))
     log(f"Total JSONs in cache: {len(all_json_files)}")
 
-    # Only runs listed in metadata_cleaned.csv are used (e.g. removed lab-strain runs
-    # whose JSONs are still in an older release are ignored)
-    known_runs = set(pd.read_csv(METADATA_CSV, dtype=str, usecols=["Run"])["Run"].dropna().str.strip())
-
-    all_data, new_data, corrupt = {}, {}, []
+    all_data, corrupt = {}, []
     for jf in all_json_files:
         run_id = jf.name.replace(".results.json", "")
-        if run_id not in known_runs:
+        # Only runs listed in metadata_cleaned.csv are used (e.g. removed lab-strain
+        # runs whose JSONs are still in an older release are ignored)
+        if run_id not in biosample_of_run:
             continue
         try:
             with open(jf) as f:
-                d = json.load(f)
-            all_data[run_id] = d
-            if run_id in new_runs:
-                new_data[run_id] = d
+                all_data[run_id] = json.load(f)
         except Exception as e:
             corrupt.append(run_id)
             log(f"  Corrupt: {run_id} - {e}")
-
-    log(f"Valid JSONs (all) : {len(all_data)}")
-    log(f"Valid JSONs (new) : {len(new_data)}")
+    log(f"Valid JSONs: {len(all_data)}")
     if corrupt:
-        log(f"Corrupt           : {len(corrupt)}")
+        log(f"Corrupt    : {len(corrupt)}")
 
-    # Step 2: Nodes and relationships for the new runs
-    log("\n1. Building nodes and relationships for new runs...")
-    summary_rows = [build_summary_row(run_id, d) for run_id, d in new_data.items()]
-    qc_rows      = [build_qc_row(run_id, d)      for run_id, d in new_data.items()]
-    mut_rows     = [row for run_id, d in new_data.items() for row in build_mut_rows(run_id, d)]
+    failed_errors = {}
+    if FAILED_FILE.exists():
+        df_failed = pd.read_csv(FAILED_FILE, dtype=str).fillna("")
+        failed_errors = dict(zip(df_failed["run_id"], df_failed["error"]))
 
-    df_summary = pd.DataFrame(summary_rows)
-    df_qc      = pd.DataFrame(qc_rows)
-    df_mut     = pd.DataFrame(mut_rows) if mut_rows else pd.DataFrame()
-    log(f"  New sample summaries : {len(df_summary)}")
-    log(f"  New mutation rows    : {len(df_mut)}")
+    # Step 2: Best run of every BioSample
+    best_run = {bs: select_best_run(runs, all_data) for bs, runs in runs_by_biosample.items()}
+    multi = {bs: runs for bs, runs in runs_by_biosample.items() if len(runs) > 1}
+    log(f"BioSamples: {len(runs_by_biosample)} ({len(multi)} with more than one run)")
+    for bs, runs in multi.items():
+        log(f"  {bs}: {len(runs)} runs, {sum(r in all_data for r in runs)} with results "
+            f"-> selected {best_run[bs]}")
 
-    # SRARun nodes: summary + QC details (qc_pass comes from the summary)
-    if not df_summary.empty and not df_qc.empty:
-        node_sample = df_summary.merge(
-            df_qc[["sample_id", "fail_reasons", "num_dr_variants",
-                   "num_other_variants", "qc_warnings", "tb_profiler_version", "db_version"]],
-            on="sample_id", how="left")
-    else:
-        node_sample = df_summary.copy()
+    # BioSamples to (re)build: those with at least one new run
+    affected = sorted({biosample_of_run[r] for r in new_runs if r in biosample_of_run})
+    unknown  = new_runs - set(biosample_of_run)
+    if unknown:
+        log(f"  Warning: {len(unknown)} new runs are not in metadata_cleaned.csv (ignored)")
+    log(f"BioSamples to build: {len(affected)}")
 
-    # Add location, date and isolation source from the metadata
-    try:
-        df_meta = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
-        df_meta = (df_meta
-                   .assign(_c=df_meta.notna().sum(axis=1))
-                   .sort_values("_c", ascending=False)
-                   .drop_duplicates(subset="Run")
-                   .drop(columns="_c"))
-        keep = [c for c in ["Run", "state", "lat", "lon", "collection_date",
-                            "BioProject_y", "isolation_source"] if c in df_meta.columns]
-        df_meta_new = df_meta[keep].rename(columns={"Run": "sample_id"})
-        df_meta_new = df_meta_new[df_meta_new["sample_id"].isin(new_runs)]
-        node_sample = node_sample.merge(df_meta_new, on="sample_id", how="left")
-        log(f"  Metadata added for {len(df_meta_new)} new runs")
-    except Exception as e:
-        log(f"  Warning while adding metadata: {e}")
+    # Step 3: BioSample, SRARun, mutation and drug rows
+    log("\n1. Building BioSample nodes and their relationships...")
+    biosample_rows, run_rows, mut_rows = [], [], []
+
+    for bs in affected:
+        runs = runs_by_biosample[bs]
+        best = best_run[bs]
+        # Metadata from the selected run (or the most complete row if there is none)
+        meta_rows = meta_by_run.loc[[best]] if best else meta_by_run.loc[runs]
+        row = {"biosample_id"     : bs,
+               "selected_run"     : best or "",
+               "n_runs"           : len(runs),
+               "n_runs_with_result": sum(r in all_data for r in runs)}
+        for src, dst in META_COLUMNS.items():
+            row[dst] = first_value(meta_rows[src]) if src in meta_rows.columns else ""
+        bp_cols = [c for c in ("BioProject_y", "BioProject_x", "BioProject") if c in meta_rows.columns]
+        row["bioproject_id"] = next((v for v in (first_value(meta_rows[c]) for c in bp_cols) if v), "")
+        geo = first_value(meta_rows["geo_loc_name"]) if "geo_loc_name" in meta_rows.columns else ""
+        row["country"] = geo.split(":")[0].strip() if geo else "Mexico"
+
+        if best:
+            data = all_data[best]
+            row.update(build_summary(data))
+            row.update({"processing_status": "ok", "processing_error": ""})
+            spots = meta_by_run.at[best, "spots"] if "spots" in meta_by_run.columns else ""
+            run_rows.append({"run_id": best, "biosample_id": bs, "spots": spots,
+                             "median_depth": row["median_depth"], "pct_mapped": row["pct_mapped"],
+                             "qc_pass": row["qc_pass"],
+                             "tb_profiler_version": row["tb_profiler_version"],
+                             "db_version": row["db_version"]})
+            mut_rows.extend(build_mut_rows(bs, best, data))
+        else:
+            spots = (pd.to_numeric(meta_rows["spots"], errors="coerce").fillna(0)
+                     if "spots" in meta_rows.columns else pd.Series([0]))
+            if (spots > 0).any():
+                errors = [failed_errors[r] for r in runs if r in failed_errors]
+                row.update({"processing_status": "failed",
+                            "processing_error" : errors[0] if errors else "No TB-Profiler result"})
+            else:
+                row.update({"processing_status": "no_data",
+                            "processing_error" : "No reads in SRA (spots = 0)"})
+        biosample_rows.append(row)
+
+    node_biosample = pd.DataFrame(biosample_rows)
+    node_run       = pd.DataFrame(run_rows)
+    df_mut         = pd.DataFrame(mut_rows) if mut_rows else pd.DataFrame()
+    if not node_biosample.empty:
+        status_counts = node_biosample["processing_status"].value_counts().to_dict()
+        log(f"  BioSample rows : {len(node_biosample)} {status_counts}")
+    log(f"  SRARun rows    : {len(node_run)}")
+    log(f"  Mutation rows  : {len(df_mut)}")
 
     # Mutation and Drug nodes, HAS_MUTATION and RESISTANT_TO relationships
     if not df_mut.empty:
@@ -312,40 +371,41 @@ def main():
         node_drug["drug_class"] = node_drug["drug"].map(DRUG_CLASSES).fillna("other")
 
         rel_has_mut = df_mut[df_mut["variant_class"] == "dr_variant"][
-            ["sample_id", "gene", "nt_change", "aa_change", "drug",
+            ["biosample_id", "gene", "nt_change", "aa_change", "drug",
              "allele_freq", "variant_depth", "variant_class"]].copy()
         rel_has_mut["mutation_id"] = mutation_id(rel_has_mut)
 
         rel_res = (df_mut[df_mut["drug"] != ""]
-                   [["sample_id", "drug", "confidence", "who_confidence"]].drop_duplicates())
+                   [["biosample_id", "drug", "confidence", "who_confidence"]].drop_duplicates())
     else:
         node_mut = node_drug = rel_has_mut = rel_res = pd.DataFrame()
 
-    # Step 3: Resistance-region similarity groups, recalculated with all runs
+    # Step 4: Resistance-region similarity groups, recalculated with all BioSamples
     #
     # Method note: distances count differences in the variants TB-Profiler reports
     # (dr_variants + other_variants), which only cover the loci in its resistance
     # database (~70 genes), NOT the whole genome. Groups therefore reflect similar
     # resistance-region genotypes and must NOT be interpreted as transmission
     # clusters, which require genome-wide SNP distances.
-    # Only genomes that pass QC are included.
+    # Only the selected run of each QC-passed BioSample is used.
     log("\n2. Recalculating similarity groups (resistance regions)...")
 
-    qc_pass_ids  = [run_id for run_id, data in all_data.items() if passes_qc(data)]
+    qc_pass_bs   = sorted(bs for bs, run in best_run.items() if run and passes_qc(all_data[run]))
     variant_rows = []
-    for run_id in qc_pass_ids:
-        data = all_data[run_id]
+    for bs in qc_pass_bs:
+        data = all_data[best_run[bs]]
         for var in data.get("dr_variants", []) + data.get("other_variants", []):
             gene   = var.get("gene_name", "")
             change = var.get("nucleotide_change", "") or var.get("protein_change", "")
             if gene and change:
-                variant_rows.append({"sample": run_id, "variant_key": f"{gene}_{change}"})
+                variant_rows.append({"sample": bs, "variant_key": f"{gene}_{change}"})
 
     cluster_rows  = []
     pairwise_rows = []
+    affected_set  = set(affected)
 
     if variant_rows:
-        # Presence/absence matrix: runs x variants
+        # Presence/absence matrix: BioSamples x variants
         df_var = pd.DataFrame(variant_rows)
         df_var["present"] = 1
         matrix = (df_var
@@ -355,7 +415,7 @@ def main():
         samples = matrix.index.tolist()
         arr = matrix.values
         n   = len(samples)
-        log(f"  Matrix: {n} samples x {matrix.shape[1]} variants")
+        log(f"  Matrix: {n} BioSamples x {matrix.shape[1]} variants")
 
         dist_matrix = np.zeros((n, n), dtype=np.int32)
         for i in range(n):
@@ -363,8 +423,8 @@ def main():
             dist_matrix[i, i + 1:] = diff
             dist_matrix[i + 1:, i] = diff
 
-        # Pairwise distances involving new runs (each pair once, up to 5x the threshold)
-        new_indices = [i for i, s in enumerate(samples) if s in new_runs]
+        # Pairwise distances involving rebuilt BioSamples (each pair once, up to 5x the threshold)
+        new_indices = [i for i, s in enumerate(samples) if s in affected_set]
         seen_pairs  = set()
         for i in new_indices:
             for j in range(n):
@@ -383,53 +443,57 @@ def main():
                         "linked"  : "Yes" if d <= SNP_THRESHOLD else "No",
                     })
 
-        # Single-linkage grouping at SNP_THRESHOLD
-        labels = fcluster(linkage(squareform(dist_matrix), method="single"),
-                          t=SNP_THRESHOLD, criterion="distance")
+        # Single-linkage grouping at SNP_THRESHOLD (needs at least two BioSamples)
+        labels = (fcluster(linkage(squareform(dist_matrix), method="single"),
+                           t=SNP_THRESHOLD, criterion="distance") if n > 1 else [1] * n)
         members_by_label = {}
-        for run_id, label in zip(samples, labels):
-            members_by_label.setdefault(label, []).append(run_id)
+        for bs, label in zip(samples, labels):
+            members_by_label.setdefault(label, []).append(bs)
 
         grouped = set()
         for members in members_by_label.values():
             if len(members) == 1:
                 continue
-            # Group ID = first member run ID in alphabetical order. Unlike a counter
+            # Group ID = first member BioSample ID in alphabetical order. Unlike a counter
             # (C0001, C0002...), it stays the same between runs unless the group changes.
             cluster_id = f"CL_{min(members)}"
-            for run_id in members:
-                cluster_rows.append(similarity_row(run_id, cluster_id, len(members)))
-                grouped.add(run_id)
+            for bs in members:
+                cluster_rows.append(similarity_row(bs, cluster_id, len(members)))
+                grouped.add(bs)
 
-        for run_id in qc_pass_ids:
-            if run_id not in grouped:
-                cluster_rows.append(similarity_row(run_id, "singleton", 1))
+        for bs in qc_pass_bs:
+            if bs not in grouped:
+                cluster_rows.append(similarity_row(bs, "singleton", 1))
 
         in_groups = [r for r in cluster_rows if r["cluster_id"] != "singleton"]
-        log(f"  Samples in groups : {len(in_groups)}")
-        log(f"  Distinct groups   : {len({r['cluster_id'] for r in in_groups})}")
-        log(f"  Singletons        : {len(cluster_rows) - len(in_groups)}")
+        log(f"  BioSamples in groups : {len(in_groups)}")
+        log(f"  Distinct groups      : {len({r['cluster_id'] for r in in_groups})}")
+        log(f"  Singletons           : {len(cluster_rows) - len(in_groups)}")
     else:
-        log("  No variants available - all samples marked as singletons")
-        for run_id in qc_pass_ids:
-            cluster_rows.append(similarity_row(run_id, "singleton", 1))
+        log("  No variants available - all BioSamples marked as singletons")
+        for bs in qc_pass_bs:
+            cluster_rows.append(similarity_row(bs, "singleton", 1))
 
     df_clusters = pd.DataFrame(cluster_rows)
     df_pairwise = pd.DataFrame(pairwise_rows)
     df_linked   = (df_pairwise[df_pairwise["linked"] == "Yes"][["sample_a", "sample_b", "snp_dist"]]
                    if not df_pairwise.empty else pd.DataFrame())
 
-    # Add the group of each new run to its SRARun node
-    if not df_clusters.empty and not node_sample.empty:
-        node_sample = node_sample.merge(
-            df_clusters[df_clusters["sample_id"].isin(new_runs)]
-            [["sample_id", "cluster_id", "cluster_size"]],
-            on="sample_id", how="left")
+    # Add the group of each rebuilt BioSample to its node
+    if not df_clusters.empty and not node_biosample.empty:
+        node_biosample = node_biosample.merge(
+            df_clusters[df_clusters["biosample_id"].isin(affected_set)]
+            [["biosample_id", "cluster_id", "cluster_size"]],
+            on="biosample_id", how="left")
 
-    # Step 4: Save CSVs
+    # Step 5: Save CSVs (files from a previous run are removed first, so an
+    # empty table never leaves an old file behind)
     log("\n3. Saving CSVs to ~/neo4j_export/...")
+    for old in OUTPUT_DIR.glob("*.csv"):
+        old.unlink()
     files = {
-        "neo4j_nodes_sample.csv"        : node_sample,
+        "neo4j_nodes_biosample.csv"     : node_biosample,
+        "neo4j_nodes_run.csv"           : node_run,
         "neo4j_nodes_mutation.csv"      : node_mut,
         "neo4j_nodes_drug.csv"          : node_drug,
         "neo4j_rel_has_mutation.csv"    : rel_has_mut,
