@@ -61,7 +61,8 @@ df["state"] = df["state"].fillna("").replace("", "—")
 df["drtype_icon"] = df["drtype"].map(DRTYPE_ICONS).fillna("⚪") + " " + df["drtype"].fillna("")
 
 display_cols = {
-    "sample_id":       "ID Muestra",
+    "sample_id":       "BioSample",
+    "run_id":          "Run SRA",
     "drtype_icon":     "Resistencia",
     "lineage":         "Linaje",
     "sub_lineage":     "Sub-linaje",
@@ -76,7 +77,8 @@ st.dataframe(
     hide_index=True,
     height=480,
     column_config={
-        "ID Muestra":       st.column_config.TextColumn(width="small"),
+        "BioSample":        st.column_config.TextColumn(width="small"),
+        "Run SRA":          st.column_config.TextColumn(width="small"),
         "Resistencia":      st.column_config.TextColumn(width="medium"),
         "Año":              st.column_config.TextColumn(width="small"),
         "Profundidad":      st.column_config.NumberColumn(format="%.1f×", width="small"),
