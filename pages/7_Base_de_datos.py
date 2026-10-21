@@ -55,8 +55,8 @@ section("Nodos y propiedades")
 
 # Esquema tal como lo crea pipeline/04_load_neo4j.py
 nodes_data = pd.DataFrame([
-    ("SRARun",     "run_id",        "run_id, spots (int), has_data, lineage, sub_lineage, drtype, is_rr, is_mdr, is_xdr, is_mtb, species, mixed_infection, resistant_drugs, median_depth, pct_mapped, qc_pass, fail_reasons, qc_warnings, num_dr_variants, num_other_variants, collection_date, isolation_source, processing_status, processing_error, tb_profiler_version, db_version"),
-    ("BioSample",  "biosample_id",  "biosample_id"),
+    ("BioSample",  "biosample_id",  "biosample_id, selected_run, n_runs (int), n_runs_with_result (int), processing_status, processing_error, lineage, sub_lineage, drtype, is_rr, is_mdr, is_xdr, is_mtb, species, mixed_infection, resistant_drugs, median_depth, pct_mapped, qc_pass, fail_reasons, qc_warnings, num_dr_variants, num_other_variants, collection_date, isolation_source, tb_profiler_version, db_version"),
+    ("SRARun",     "run_id",        "run_id, spots (int), median_depth, pct_mapped, qc_pass, tb_profiler_version, db_version (solo el run seleccionado de cada BioSample)"),
     ("Host",       "host_id",       "host_id, host_type, host_sex, host_age, host_disease"),
     ("Location",   "state",         "state, country, lat, lon"),
     ("BioProject", "bioproject_id", "bioproject_id, study_id"),
@@ -64,7 +64,7 @@ nodes_data = pd.DataFrame([
     ("TimePoint",  "timepoint_id",  "timepoint_id, year, sample_count, mdr_count, mdr_rate, rr_count, rr_rate"),
     ("Cluster",    "cluster_id",    "cluster_id, size, method, snp_threshold"),
     ("Drug",       "name",          "name, drug_class"),
-    ("Mutation",   "mutation_id",   "mutation_id, gene, nt_change, aa_change, variant_type, genome_pos, confidence, variant_class, drug"),
+    ("Mutation",   "mutation_id",   "mutation_id, gene, nt_change, aa_change, variant_type, genome_pos, confidence, who_confidence, variant_class, drug"),
 ], columns=["Nodo", "Clave (Key)", "Propiedades"])
 
 st.dataframe(
@@ -80,17 +80,17 @@ st.dataframe(
 section("Relaciones")
 
 rels_data = pd.DataFrame([
-    ("BioSample", "[:HAS_RUN]",            "SRARun",     "—"),
-    ("SRARun",    "[:FROM_HOST]",          "Host",       "—"),
-    ("SRARun",    "[:COLLECTED_IN]",       "Location",   "—"),
-    ("SRARun",    "[:PART_OF]",            "BioProject", "—"),
-    ("SRARun",    "[:BELONGS_TO]",         "Lineage",    "—"),
-    ("SRARun",    "[:DETECTED_IN]",        "TimePoint",  "—"),
-    ("SRARun",    "[:IN_CLUSTER]",         "Cluster",    "—"),
-    ("SRARun",    "[:RESISTANT_TO]",       "Drug",       "confidence"),
-    ("SRARun",    "[:HAS_MUTATION]",       "Mutation",   "allele_freq (float), variant_depth (int), drug, variant_class"),
-    ("Mutation",  "[:CONFERS_RESISTANCE]", "Drug",       "confidence"),
-    ("SRARun",    "[:LINKED_TO]",          "SRARun",     "snp_dist (int, ≤ 12 SNPs en regiones de resistencia)"),
+    ("BioSample", "[:HAS_RUN]",            "SRARun",     "— (run seleccionado)"),
+    ("BioSample", "[:FROM_HOST]",          "Host",       "—"),
+    ("BioSample", "[:COLLECTED_IN]",       "Location",   "—"),
+    ("BioSample", "[:PART_OF]",            "BioProject", "—"),
+    ("BioSample", "[:BELONGS_TO]",         "Lineage",    "—"),
+    ("BioSample", "[:DETECTED_IN]",        "TimePoint",  "—"),
+    ("BioSample", "[:IN_CLUSTER]",         "Cluster",    "—"),
+    ("BioSample", "[:RESISTANT_TO]",       "Drug",       "confidence, who_confidence"),
+    ("BioSample", "[:HAS_MUTATION]",       "Mutation",   "allele_freq (float), variant_depth (int), drug, variant_class"),
+    ("Mutation",  "[:CONFERS_RESISTANCE]", "Drug",       "confidence, who_confidence"),
+    ("BioSample", "[:LINKED_TO]",          "BioSample",  "snp_dist (int, ≤ 12 SNPs en regiones de resistencia)"),
 ], columns=["Nodo de Origen", "Relación", "Nodo Final", "Propiedades"])
 
 st.dataframe(
@@ -113,7 +113,7 @@ st.markdown("""
 </p>
 """, unsafe_allow_html=True)
 
-default_query = """MATCH (s:SRARun)-[:RESISTANT_TO]->(d:Drug)
+default_query = """MATCH (s:BioSample)-[:RESISTANT_TO]->(d:Drug)
 RETURN d.name AS drug, count(s) AS samples
 ORDER BY samples DESC
 LIMIT 10"""
@@ -164,14 +164,14 @@ RETURN t.year, t.mdr_rate
 ORDER BY t.year""", language="cypher")
 
     st.markdown("**Linajes en un estado**")
-    st.code("""MATCH (r:SRARun)-[:COLLECTED_IN]->(l:Location {state:'Guerrero'})
+    st.code("""MATCH (r:BioSample)-[:COLLECTED_IN]->(l:Location {state:'Guerrero'})
 MATCH (r)-[:BELONGS_TO]->(lin:Lineage)
 RETURN lin.lineage_id, count(r) AS n
 ORDER BY n DESC""", language="cypher")
 
 with q2:
     st.markdown("**Grupos de similitud genotípica (regiones de resistencia)**")
-    st.code("""MATCH (s:SRARun)-[:IN_CLUSTER]->(c:Cluster)
+    st.code("""MATCH (s:BioSample)-[:IN_CLUSTER]->(c:Cluster)
 RETURN c.cluster_id, c.size,
        sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr
 ORDER BY c.size DESC""", language="cypher")
@@ -179,7 +179,7 @@ ORDER BY c.size DESC""", language="cypher")
                "no indican transmisión.")
 
     st.markdown("**Mutaciones más frecuentes**")
-    st.code("""MATCH (r:SRARun)-[:HAS_MUTATION]->(m:Mutation)
+    st.code("""MATCH (r:BioSample)-[:HAS_MUTATION]->(m:Mutation)
 RETURN m.gene, m.aa_change, count(r) AS n
 ORDER BY n DESC LIMIT 10""", language="cypher")
 
