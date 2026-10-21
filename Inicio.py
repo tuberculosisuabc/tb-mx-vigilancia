@@ -26,7 +26,7 @@ st.markdown("""
     <p class='texto' style='line-height:2'>
         1. Obtención de datos desde NCBI, aplicando filtros específicos para obtener muestras de <i>M. tuberculosis</i> provenientes de México<br>
         2. Extracción de metadata relevante y accesos a SRA<br>
-        3. Análisis genómico de los runs de SRA disponibles con TB-Profiler<br>
+        3. Análisis genómico de los runs de SRA disponibles con TB-Profiler; si una muestra tiene varios runs, se usa el de mejor calidad<br>
         4. Integración de metadata y resultados como nodos y relaciones para insertar en Neo4j<br>
         5. Análisis y visualización de datos a partir de queries
     </p>
@@ -40,19 +40,19 @@ with st.spinner("Cargando datos..."):
 
 # (valor, etiqueta, clase de color, descripción al pasar el cursor)
 overview_cards = [
-    (overview["total_biosamples"], "BioSamples totales", "kpi-green",
-     "Muestras biológicas únicas registradas en NCBI"),
-    (overview["total_sra_runs"],   "SRA disponibles",    "kpi-green",
-     "Total de SRA Run IDs registrados en NCBI para México"),
-    (overview["runs_processed"],   "Runs procesados",    "kpi-green",
-     "Runs analizados con TB-Profiler v6"),
-    (overview["qc_pass"],          "QC aprobado",        "kpi-green",
-     "Runs con cobertura y mapeo suficiente"),
-    (overview["mdr"],              "TB-MDR",             "kpi-amber",
+    (overview["total_biosamples"], "BioSamples",        "kpi-green",
+     "Muestras biológicas de M. tuberculosis de México con al menos un run en SRA"),
+    (overview["with_data"],        "Con lecturas",      "kpi-green",
+     "BioSamples con lecturas disponibles en SRA"),
+    (overview["processed"],        "Analizados",        "kpi-green",
+     "BioSamples analizados con TB-Profiler v6 (se usa el mejor run de cada uno)"),
+    (overview["qc_pass"],          "QC aprobado",       "kpi-green",
+     "BioSamples con cobertura y mapeo suficiente"),
+    (overview["mdr"],              "TB-MDR",            "kpi-amber",
      "Muestras con resistencia a rifampicina e isoniacida"),
-    (overview["xdr"],              "TB-XDR",             "kpi-red",
+    (overview["xdr"],              "TB-XDR",            "kpi-red",
      "Muestras con resistencia extensiva a fármacos"),
-    (f"{overview['mdr_rate']}%",   "Tasa TB-MDR",        "kpi-amber",
+    (f"{overview['mdr_rate']}%",   "Tasa TB-MDR",       "kpi-amber",
      "Porcentaje de TB-MDR sobre los genomas con QC aprobado"),
 ]
 for col, (val, label, klass, tooltip) in zip(st.columns(len(overview_cards)), overview_cards):
@@ -70,9 +70,9 @@ ov_left, ov_right = st.columns([1.4, 1])
 
 with ov_left:
     funnel_fig = go.Figure(go.Funnel(
-        y=["BioSamples totales", "SRA disponibles", "Runs procesados", "QC aprobado"],
-        x=[overview["total_biosamples"], overview["total_sra_runs"],
-           overview["runs_processed"], overview["qc_pass"]],
+        y=["BioSamples", "Con lecturas", "Analizados", "QC aprobado"],
+        x=[overview["total_biosamples"], overview["with_data"],
+           overview["processed"], overview["qc_pass"]],
         textinfo="value+percent initial",
         marker=dict(color=["#2D6A4F", "#40916C", "#52B788", "#74C69D"]),
         connector=dict(line=dict(color="#C8C4BC", width=1)),
@@ -81,23 +81,24 @@ with ov_left:
     show_fig(style_fig(funnel_fig, height=270))
 
 with ov_right:
-    total_runs = overview["total_sra_runs"]
-    # (etiqueta, número de runs, color, descripción para la lista de abajo)
+    total = overview["total_biosamples"]
+    # (etiqueta, número de BioSamples, color, descripción para la lista de abajo).
+    # Los grupos no se traslapan y suman el total de BioSamples.
     groups = [
-        ("QC aprobado",    overview["qc_pass"],                  "#2D6A4F",
-         "Runs con QC aprobado ✓"),
-        ("QC rechazado",   overview["qc_fail"],                  "#D4A017",
-         "Runs con baja cobertura o mapeo insuficiente"),
-        ("M. bovis / BCG", overview.get("no_mtb", 0),            "#8B7355",
-         "Runs de <i>M. bovis</i> / BCG (complejo <i>M. tuberculosis</i>)"),
-        ("No procesados",  overview.get("failed_processing", 0), "#C44B2B",
-         "Runs con error en TB-Profiler"),
-        ("Runs vacíos",    overview.get("empty_runs", 0),        "#B0A898",
-         "Runs sin datos en SRA (spots = 0)"),
+        ("QC aprobado",    overview["qc_pass"] - overview["no_mtb"], "#2D6A4F",
+         "BioSamples de <i>M. tuberculosis</i> con QC aprobado ✓"),
+        ("QC rechazado",   overview["qc_fail"],                      "#D4A017",
+         "BioSamples con baja cobertura o mapeo insuficiente"),
+        ("M. bovis / BCG", overview["no_mtb"],                       "#8B7355",
+         "BioSamples de <i>M. bovis</i> / BCG (complejo <i>M. tuberculosis</i>)"),
+        ("No procesados",  overview["failed"],                       "#C44B2B",
+         "BioSamples con error en la descarga o en TB-Profiler"),
+        ("Sin lecturas",   overview["no_data"],                      "#B0A898",
+         "BioSamples cuyos runs no tienen datos en SRA (spots = 0)"),
     ]
 
     def pct(v):
-        return round(v / total_runs * 100, 1)
+        return round(v / total * 100, 1) if total else 0
 
     qc_fig = go.Figure(go.Pie(
         labels=[g[0] for g in groups],
@@ -105,13 +106,13 @@ with ov_right:
         hole=0.5,
         text=[f"{pct(g[1])}%" for g in groups],
         textinfo="text",
-        hovertemplate="<b>%{label}</b><br>%{value} runs<br>%{text} de SRA disponibles<extra></extra>",
+        hovertemplate="<b>%{label}</b><br>%{value} BioSamples<br>%{text} del total<extra></extra>",
         marker=dict(colors=[g[2] for g in groups], line=dict(color=BG, width=2)),
         textposition="outside",
         textfont_size=10,
     ))
     style_fig(qc_fig, height=270, legend=dict(orientation="v", font=dict(size=10)),
-              annotations=[dict(text=f"<b>{total_runs}</b><br>runs de SRA", x=0.5, y=0.5,
+              annotations=[dict(text=f"<b>{total}</b><br>BioSamples", x=0.5, y=0.5,
                                 font_size=11, font_color=TEXT_DARK, showarrow=False)])
     show_fig(qc_fig)
 
