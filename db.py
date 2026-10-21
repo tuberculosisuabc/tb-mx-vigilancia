@@ -40,8 +40,9 @@ def query(cypher: str, params: dict = None) -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600)
 def get_kpis() -> dict:
+    # Una muestra = un BioSample; sus resultados vienen del mejor run (ver pipeline/03)
     rows = query("""
-        MATCH (s:SRARun)
+        MATCH (s:BioSample)
         RETURN
           count(s)                                             AS total,
           sum(CASE WHEN s.is_mdr  = 'Yes' THEN 1 ELSE 0 END) AS mdr,
@@ -55,48 +56,26 @@ def get_kpis() -> dict:
 
 @st.cache_data(ttl=3600)
 def get_data_overview() -> dict:
-    bs = query("MATCH (b:BioSample) RETURN count(b) AS total_biosamples")[0]
-
-    sra = query("""
-        MATCH (r:SRARun)
-        RETURN
-            count(r) AS total_sra_runs,
-            sum(CASE WHEN r.spots = 0 OR r.spots IS NULL THEN 1 ELSE 0 END) AS empty_runs
-    """)[0]
-
+    """Conteos por BioSample para las tarjetas y gráficas de Inicio.
+    processing_status: 'ok' (con resultado de TB-Profiler), 'failed' (el análisis
+    falló) o 'no_data' (sin lecturas en SRA)."""
     s = query("""
-        MATCH (s:SRARun)
-        WHERE s.qc_pass IS NOT NULL
+        MATCH (s:BioSample)
         RETURN
-            count(s)                                                  AS runs_processed,
-            sum(CASE WHEN s.qc_pass = 'PASS' THEN 1 ELSE 0 END)      AS qc_pass,
-            sum(CASE WHEN s.qc_pass = 'FAIL' THEN 1 ELSE 0 END)      AS qc_fail_real,
-            sum(CASE WHEN s.is_mtb  = 'No'   THEN 1 ELSE 0 END)      AS no_mtb,
-            sum(CASE WHEN s.is_mdr  = 'Yes'  THEN 1 ELSE 0 END)      AS mdr,
-            sum(CASE WHEN s.is_xdr  = 'Yes'  THEN 1 ELSE 0 END)      AS xdr
+            count(s)                                                          AS total_biosamples,
+            sum(CASE WHEN s.processing_status <> 'no_data' THEN 1 ELSE 0 END) AS with_data,
+            sum(CASE WHEN s.processing_status = 'ok'       THEN 1 ELSE 0 END) AS processed,
+            sum(CASE WHEN s.processing_status = 'failed'   THEN 1 ELSE 0 END) AS failed,
+            sum(CASE WHEN s.processing_status = 'no_data'  THEN 1 ELSE 0 END) AS no_data,
+            sum(CASE WHEN s.qc_pass = 'PASS' THEN 1 ELSE 0 END)               AS qc_pass,
+            sum(CASE WHEN s.qc_pass = 'FAIL' THEN 1 ELSE 0 END)               AS qc_fail,
+            sum(CASE WHEN s.is_mtb  = 'No'   THEN 1 ELSE 0 END)               AS no_mtb,
+            sum(CASE WHEN s.is_mdr  = 'Yes'  THEN 1 ELSE 0 END)               AS mdr,
+            sum(CASE WHEN s.is_xdr  = 'Yes'  THEN 1 ELSE 0 END)               AS xdr,
+            sum(coalesce(s.n_runs, 0))                                        AS total_runs
     """)[0]
-
-    total_sra_runs    = sra["total_sra_runs"]
-    empty_runs        = sra["empty_runs"]
-    runs_processed    = s["runs_processed"]
-    qc_pass           = s["qc_pass"]
-    mdr               = s["mdr"]
-    real_runs         = total_sra_runs - empty_runs
-    failed_processing = max(0, real_runs - runs_processed)
-
-    return {
-        "total_biosamples" : bs["total_biosamples"],
-        "total_sra_runs"   : total_sra_runs,
-        "runs_processed"   : runs_processed,
-        "qc_pass"          : qc_pass,
-        "mdr"              : mdr,
-        "xdr"              : s["xdr"],
-        "mdr_rate"         : round(mdr / qc_pass * 100, 1) if qc_pass else 0,
-        "empty_runs"       : empty_runs,
-        "failed_processing": failed_processing,
-        "qc_fail"          : s["qc_fail_real"],
-        "no_mtb"           : s["no_mtb"],
-    }
+    s["mdr_rate"] = round(s["mdr"] / s["qc_pass"] * 100, 1) if s["qc_pass"] else 0
+    return s
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -120,7 +99,7 @@ def get_mdr_trend() -> list[dict]:
 def get_lineage_dist() -> list[dict]:
     return query("""
         MATCH (l:Lineage)
-        OPTIONAL MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
+        OPTIONAL MATCH (s:BioSample {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
         WITH l, collect(DISTINCT s.sub_lineage) AS subs
         RETURN l.lineage_id AS lineage, l.sample_count AS count,
                l.top_level AS top_level, l.description AS description,
@@ -132,7 +111,7 @@ def get_lineage_dist() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_lineage_by_year() -> list[dict]:
     return query("""
-        MATCH (s:SRARun {qc_pass: 'PASS'})-[:BELONGS_TO]->(lin:Lineage),
+        MATCH (s:BioSample {qc_pass: 'PASS'})-[:BELONGS_TO]->(lin:Lineage),
               (s)-[:DETECTED_IN]->(t:TimePoint)
         RETURN t.year AS year, lin.top_level AS lineage, count(s) AS n
         ORDER BY year, n DESC
@@ -145,7 +124,7 @@ def get_lineage_by_year() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_cases_by_state() -> list[dict]:
     return query("""
-        MATCH (s:SRARun {qc_pass: 'PASS'})-[:COLLECTED_IN]->(l:Location)
+        MATCH (s:BioSample {qc_pass: 'PASS'})-[:COLLECTED_IN]->(l:Location)
         WHERE l.state <> ''
         RETURN l.state AS state,
                count(s) AS total,
@@ -163,7 +142,7 @@ def get_cases_by_state() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_resistance_profile() -> list[dict]:
     return query("""
-        MATCH (s:SRARun)
+        MATCH (s:BioSample)
         WHERE s.drtype IS NOT NULL AND s.drtype <> '' AND s.drtype <> 'Low_coverage'
         RETURN
             CASE WHEN s.is_mtb = 'No' THEN 'No-Mtb' ELSE s.drtype END AS drtype,
@@ -175,7 +154,7 @@ def get_resistance_profile() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_drug_resistance_counts() -> list[dict]:
     return query("""
-        MATCH (s:SRARun)-[:RESISTANT_TO]->(d:Drug)
+        MATCH (s:BioSample)-[:RESISTANT_TO]->(d:Drug)
         RETURN d.name AS drug, d.drug_class AS drug_class, count(s) AS count
         ORDER BY count DESC
     """)
@@ -189,7 +168,7 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
     """Mutaciones de resistencia más frecuentes. Si se indican fármacos, el top N
     se calcula solo entre las mutaciones asociadas a esos fármacos."""
     return query("""
-        MATCH (s:SRARun)-[:HAS_MUTATION]->(m:Mutation)
+        MATCH (s:BioSample)-[:HAS_MUTATION]->(m:Mutation)
         WHERE m.variant_class = 'dr_variant'
           AND m.gene IS NOT NULL AND m.gene <> ''
           AND (size($drugs) = 0 OR m.drug IN $drugs)
@@ -210,7 +189,7 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
 def get_mutation_network(min_samples: int = 5) -> list[dict]:
     """Nodos y aristas de la red mutación–fármaco."""
     return query("""
-        MATCH (s:SRARun)-[:HAS_MUTATION]->(m:Mutation),
+        MATCH (s:BioSample)-[:HAS_MUTATION]->(m:Mutation),
               (s)-[:RESISTANT_TO]->(d:Drug)
         WHERE m.drug = d.name
           AND m.variant_class = 'dr_variant'
@@ -256,13 +235,14 @@ def get_samples_table(
     # condiciona ese OPTIONAL MATCH y no elimina filas, así que los filtros no se
     # aplicarían.
     return query(f"""
-        MATCH (s:SRARun)
+        MATCH (s:BioSample)
         OPTIONAL MATCH (s)-[:COLLECTED_IN]->(l:Location)
         OPTIONAL MATCH (s)-[:BELONGS_TO]->(lin:Lineage)
         OPTIONAL MATCH (s)-[:DETECTED_IN]->(t:TimePoint)
         WITH s, l, lin, t
         {where_str}
-        RETURN s.run_id           AS sample_id,
+        RETURN s.biosample_id     AS sample_id,
+               s.selected_run     AS run_id,
                s.drtype           AS drtype,
                s.lineage          AS lineage,
                s.sub_lineage      AS sub_lineage,
@@ -274,7 +254,7 @@ def get_samples_table(
                l.state            AS state,
                t.year             AS year,
                s.collection_date  AS collection_date
-        ORDER BY s.run_id
+        ORDER BY s.biosample_id
         LIMIT 2000
     """, params)
 
@@ -294,7 +274,7 @@ def get_states() -> list[str]:
 @st.cache_data(ttl=3600)
 def get_drtypes() -> list[str]:
     rows = query("""
-        MATCH (s:SRARun)
+        MATCH (s:BioSample)
         WHERE s.drtype IS NOT NULL AND s.drtype <> ''
         RETURN DISTINCT s.drtype AS drtype ORDER BY drtype
     """)
