@@ -57,14 +57,14 @@ jobs:
       - name: Consultar la página de Streamlit
         if: always()
         run: |
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+          STATUS=$(curl -s -L -o /dev/null -w "%{http_code}" \
             --max-time 30 \
             --retry 3 \
             --retry-delay 10 \
             https://tb-mx-vigilancia.streamlit.app/)
           echo "Estado HTTP de Streamlit: $STATUS"
           if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
-            echo "La aplicación de Streamlit está activa"
+            echo "La aplicación de Streamlit responde"
           else
             echo "Estado inesperado: $STATUS (la aplicación puede estar iniciando)"
           fi
