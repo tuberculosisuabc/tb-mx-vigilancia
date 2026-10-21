@@ -1,3 +1,4 @@
+name: Mantenimiento/Activar
 on:
   schedule:
     - cron: '0 */6 * * *'       # cada 6 horas
