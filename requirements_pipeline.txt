@@ -1,7 +1,0 @@
-# Python libraries used by pipeline/*.py
-biopython
-neo4j
-pandas
-scipy
-numpy
-pyyaml
