@@ -1,0 +1,69 @@
+on:
+  schedule:
+    - cron: '0 */6 * * *'       # cada 6 horas
+  workflow_dispatch:            # ejecución manual desde la pestaña Actions
+
+jobs:
+  mantenimiento:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write            # necesario para reactivar workflows con la API
+
+    steps:
+      #1. Reavticar workflows (GitHub)
+      - name: Reactivar workflows 
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for wf in pipeline.yml mantenimiento.yml; do
+            gh api --method PUT \
+              "repos/${{ github.repository }}/actions/workflows/$wf/enable"
+            echo "Workflow reactivado: $wf"
+          done
+
+      # 2. Mantener Neo4j activo 
+      - name: Instalar driver de Neo4j
+        if: always()
+        run: pip install neo4j
+
+      - name: Consultar Neo4j
+        if: always()
+        env:
+          NEO4J_URI:      ${{ secrets.NEO4J_URI }}
+          NEO4J_USER:     ${{ secrets.NEO4J_USER }}
+          NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
+        run: |
+          python3 - <<'EOF'
+          import os
+          from neo4j import GraphDatabase
+
+          uri      = os.environ["NEO4J_URI"]
+          user     = os.environ["NEO4J_USER"]
+          password = os.environ["NEO4J_PASSWORD"]
+
+          if not uri:
+              raise ValueError("El secreto NEO4J_URI está vacío - revisar los secretos del repositorio")
+
+          driver = GraphDatabase.driver(uri, auth=(user, password))
+          with driver.session() as session:
+              n = session.run("MATCH (s:SRARun) RETURN count(s) AS n").single()["n"]
+              print(f"Neo4j activo - {n} nodos SRARun")
+          driver.close()
+          EOF
+
+      # 3. Mantener Streamlit activo
+      - name: Consultar la página de Streamlit
+        if: always()
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            --retry 3 \
+            --retry-delay 10 \
+            https://tb-mx-vigilancia.streamlit.app/)
+          echo "Estado HTTP de Streamlit: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+            echo "La aplicación de Streamlit está activa"
+          else
+            echo "Estado inesperado: $STATUS (la aplicación puede estar iniciando)"
+          fi
