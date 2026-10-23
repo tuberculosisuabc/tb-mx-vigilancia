@@ -66,24 +66,24 @@ jobs:
         continue-on-error: true
         run: | 
           python3 - <<'EOF'
-            import re
-            from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+          import re
+          from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
    
-            URL = "https://tb-mx-vigilancia.streamlit.app/"
+          URL = "https://tb-mx-vigilancia.streamlit.app/"
    
-            with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
-                page.goto(URL, wait_until="domcontentloaded", timeout=60000)
-                boton = page.get_by_role("button", name=re.compile("get this app back up", re.I))
-                try:
-                    boton.wait_for(timeout=15000)
-                    boton.click()
-                    print("La app estaba dormida: se pulsó el botón para despertarla")
-                except PWTimeout:
-                    print("La app estaba despierta")
-                # Mantener la visita abierta para que cuente y la app termine de cargar
-                page.wait_for_timeout(60000)
-                page.screenshot(path="streamlit.png")
-                browser.close()
-            EOF
+          with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            boton = page.get_by_role("button", name=re.compile("get this app back up", re.I))
+            try:
+              boton.wait_for(timeout=15000)
+              boton.click()
+              print("La app estaba dormida: se pulsó el botón para despertarla")
+            except PWTimeout:
+              print("La app estaba despierta")
+            # Mantener la visita abierta para que cuente y la app termine de cargar
+            page.wait_for_timeout(60000)
+            page.screenshot(path="streamlit.png")
+            browser.close()
+          EOF
