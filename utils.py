@@ -87,7 +87,6 @@ DRTYPE_DESCRIPTIONS = {
     "TB-pre-XDR":       "TB-MDR/RR <b>+</b> fluoroquinolona",
     "TB-XDR":           "TB-pre-XDR <b>+</b> bedaquilina y/o linezolid",
     "Otra resistencia": "Resistencia a otros fármacos (sin isoniacida ni rifampicina)",
-    "M. bovis / BCG":   "Complejo <i>M. tuberculosis</i>, pero no <i>M. tuberculosis</i>",
 }
 
 
