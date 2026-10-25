@@ -1,15 +1,18 @@
 name: Recargar datos históricos en Neo4j
 
-# Reconstruye el grafo a partir de los resultados de TB-Profiler del último release
-# de datos y de metadata_cleaned.csv. Se borra todo el grafo antes de cargar para evitar duplicados
+# Reconstruye el grafo desde cero a partir de los resultados de TB-Profiler del último
+# release de datos y de metadata_cleaned.csv. Siempre borra todo el grafo antes de cargar,
+# para no dejar nodos de versiones anteriores. El borrado ocurre después de generar los
+# CSV: si ese paso falla, la base queda intacta.
 
 on:
   workflow_dispatch:
-    inputs:
-      vaciar_base:
-        description: "Borrar TODO el grafo de Neo4j antes de recargar"
-        type: boolean
-        default: false
+
+# Mismo grupo que "Actualizar pipeline TB-MX": nunca escriben en Neo4j al mismo tiempo
+# (dos recargas a la vez se bloquean entre sí al borrar). La segunda espera a la primera.
+concurrency:
+  group: pipeline-tb-mx
+  cancel-in-progress: false
 
 jobs:
   reload:
@@ -88,7 +91,6 @@ jobs:
         run: python pipeline/03_build_graph_csvs.py
 
       - name: Vaciar la base de datos
-        if: inputs.vaciar_base
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
@@ -100,16 +102,18 @@ jobs:
 
           driver = GraphDatabase.driver(os.environ["NEO4J_URI"],
                                         auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"]))
+          def borrar_lote(tx):
+              return tx.run("""
+                  MATCH (n) WITH n LIMIT 1000
+                  DETACH DELETE n
+                  RETURN count(*) AS borrados
+              """).single()["borrados"]
+
           with driver.session() as session:
-              # Por lotes de 1000 nodos, para no exceder la memoria de la instancia gratuita
-              while True:
-                  borrados = session.run("""
-                      MATCH (n) WITH n LIMIT 1000
-                      DETACH DELETE n
-                      RETURN count(*) AS borrados
-                  """).single()["borrados"]
-                  if borrados == 0:
-                      break
+              # Por lotes de 1000 nodos, para no exceder la memoria de la instancia gratuita.
+              # execute_write reintenta solo si Neo4j reporta un error transitorio (p. ej. deadlock).
+              while session.execute_write(borrar_lote) > 0:
+                  pass
               n = session.run("MATCH (n) RETURN count(n) AS n").single()["n"]
               print(f"Base de datos vaciada - nodos restantes: {n}")
           driver.close()
@@ -133,4 +137,3 @@ jobs:
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| JSONs en cache | $JSON_COUNT |" >> $GITHUB_STEP_SUMMARY
           echo "| Runs en la metadata | $RUNS_COUNT |" >> $GITHUB_STEP_SUMMARY
-          echo "| Base vaciada antes de cargar | ${{ inputs.vaciar_base }} |" >> $GITHUB_STEP_SUMMARY
