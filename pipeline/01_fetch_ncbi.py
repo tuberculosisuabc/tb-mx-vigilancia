@@ -25,12 +25,14 @@ from pathlib import Path
 import pandas as pd
 from Bio import Entrez
 
-# --- Configuration ---
+# Configuration
 Entrez.email  = "daniela.santana@uabc.edu.mx"
 METADATA_CSV  = Path.home() / "metadata_cleaned.csv"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
-RETMAX        = 2000
+PENDING_FILE  = Path.home() / "pending_runs.txt"   # runs left for the next run (a number)
+RETMAX = 2000
 BATCH_SIZE    = 200      # BioSamples per efetch request
+MAX_RUNS = 25 #Max samples to process to stay under github limit of  6 hours
 
 BIOSAMPLE_QUERY = (
     '"Mycobacterium tuberculosis"[Organism] '
@@ -184,7 +186,25 @@ def parse_biosample(bs):
 def finish_without_new_runs(message):
     log(message)
     NEW_RUNS_FILE.write_text("")
+    PENDING_FILE.write_text("0\n")
     sys.exit(0)
+
+
+def limit_runs(df, max_runs):
+    """Keep whole BioSamples until max_runs runs are reached (at least one BioSample).
+    BioSamples are never split: step 3 skips any BioSample already in the metadata,
+    so a run left behind from a BioSample that was saved would never be fetched again.
+    Returns (rows kept, number of runs left for the next run)."""
+    runs_per_bs = df.groupby("BioSampleID")["Run"].nunique().sort_index()
+    if runs_per_bs.sum() <= max_runs:
+        return df, 0
+    keep, total = [], 0
+    for bs, n in runs_per_bs.items():
+        if keep and total + n > max_runs:
+            break
+        keep.append(bs)
+        total += n
+    return df[df["BioSampleID"].isin(keep)], int(runs_per_bs.sum() - total)
 
 
 # --- Main ---
@@ -282,6 +302,14 @@ def main():
     if merged.empty:
         finish_without_new_runs("\nAll runs were already processed. Nothing to update.")
 
+    # Keep at most MAX_RUNS runs in this pipeline run
+    found = merged["Run"].nunique()
+    merged, pending = limit_runs(merged, MAX_RUNS)
+    if pending:
+        log(f"  Limit of {MAX_RUNS} runs per pipeline run: processing {found - pending}, "
+            f"{pending} left for the next run")
+    PENDING_FILE.write_text(f"{pending}\n")
+
     # Step 6: Assign state and coordinates
     log("\nAssigning state and coordinates...")
     geo_col = next((c for c in merged.columns if "geo_loc" in c.lower()), None)
@@ -314,12 +342,14 @@ def main():
     NEW_RUNS_FILE.write_text("\n".join(new_run_ids) + "\n")
 
     log("\n" + "=" * 60)
-    log(f"RESULT: {len(new_run_ids)} new runs to process")
+    log(f"RESULT: {len(new_run_ids)} new runs to process"
+        + (f" ({pending} left for the next run)" if pending else ""))
     for run_id in new_run_ids:
         log(f"  {run_id}")
     log("\nFiles updated:")
     log(f"  {METADATA_CSV}")
     log(f"  {NEW_RUNS_FILE}")
+    log(f"  {PENDING_FILE}")
     log("=" * 60)
 
 
