@@ -58,15 +58,17 @@ def get_kpis() -> dict:
 def get_data_overview() -> dict:
     """Conteos por BioSample para las tarjetas y gráficas de Inicio.
     processing_status: 'ok' (con resultado de TB-Profiler), 'failed' (el análisis
-    falló) o 'no_data' (sin lecturas en SRA)."""
+    falló), 'no_data' (sus runs no tienen lecturas en SRA) o 'no_run' (sin run de
+    WGS en SRA; solo metadata de BioSample)."""
     s = query("""
         MATCH (s:BioSample)
         RETURN
             count(s)                                                          AS total_biosamples,
-            sum(CASE WHEN s.processing_status <> 'no_data' THEN 1 ELSE 0 END) AS with_data,
+            sum(CASE WHEN s.processing_status IN ['ok', 'failed'] THEN 1 ELSE 0 END) AS with_data,
             sum(CASE WHEN s.processing_status = 'ok'       THEN 1 ELSE 0 END) AS processed,
             sum(CASE WHEN s.processing_status = 'failed'   THEN 1 ELSE 0 END) AS failed,
             sum(CASE WHEN s.processing_status = 'no_data'  THEN 1 ELSE 0 END) AS no_data,
+            sum(CASE WHEN s.processing_status = 'no_run'   THEN 1 ELSE 0 END) AS no_run,
             sum(CASE WHEN s.qc_pass = 'PASS' THEN 1 ELSE 0 END)               AS qc_pass,
             sum(CASE WHEN s.qc_pass = 'FAIL' THEN 1 ELSE 0 END)               AS qc_fail,
             sum(CASE WHEN s.is_mtb  = 'No'   THEN 1 ELSE 0 END)               AS no_mtb,
