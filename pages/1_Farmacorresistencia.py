@@ -22,8 +22,10 @@ page_header(
 # ── Clasificación de resistencia ─────────────────────────────────────
 section(
     "Clasificación de farmacorresistencia",
-    """Distribución de los genomas con QC aprobado según su clasificación de resistencia definida
-    por la OMS. Cada muestra se asigna a una única categoría según el patrón de resistencia detectado.""",
+    """Distribución de los genomas de <i>M. tuberculosis</i> con QC aprobado según su clasificación
+    de resistencia definida por la OMS. Cada muestra se asigna a una única categoría según el patrón
+    de resistencia detectado. Los genomas de <i>M. bovis</i> (complejo <i>M. tuberculosis</i>) se
+    excluyen de todos los análisis.""",
 )
 
 col_left, col_right = st.columns([1, 1])
@@ -60,6 +62,12 @@ with col_right:
 
 # ── Resistencia por fármaco ──────────────────────────────────────────
 df_drug = pd.DataFrame(get_drug_resistance_counts())
+if df_drug.empty:
+    # Sin relaciones RESISTANT_TO en Neo4j (p. ej. mientras corre una recarga de datos)
+    section("Resistencia por Fármaco")
+    st.info("No hay datos de resistencia por fármaco disponibles en este momento.")
+    render_footer()
+    st.stop()
 df_drug["color"]   = df_drug["drug_class"].map(DRUG_CLASS_COLORS).fillna(DRUG_CLASS_COLORS["other"])
 df_drug["clase"]   = df_drug["drug_class"].map(DRUG_CLASS_LABELS).fillna("Otros")
 df_drug["farmaco"] = df_drug["drug"].map(drug_es)
