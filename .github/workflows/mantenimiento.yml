@@ -84,6 +84,5 @@ jobs:
               print("La app estaba despierta")
             # Mantener la visita abierta para que cuente y la app termine de cargar
             page.wait_for_timeout(60000)
-            page.screenshot(path="streamlit.png")
             browser.close()
           EOF
