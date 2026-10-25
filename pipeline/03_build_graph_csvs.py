@@ -7,28 +7,23 @@ BioSample has more than one SRA run, only the best run is used:
   - among runs that pass QC, the one with the highest target median depth;
   - if none passes QC, the run with the highest depth.
 Runs that are not selected are not loaded into Neo4j (their JSONs stay in the
-GitHub data release).
+GitHub data release). BioSamples without a usable SRA run (saved by step 1 as a
+row with an empty Run) are loaded too, with processing_status = 'no_run'.
 
   1. Read the TB-Profiler JSON results (new runs + all historical runs)
   2. Select the best run of every BioSample
   3. Build BioSample, SRARun, mutation and drug rows for the BioSamples that have
      a new run (a new run can replace the one selected before)
-  4. Recalculate resistance-region similarity groups with the selected runs of
-     ALL QC-passed BioSamples
-  5. Save the CSV files to neo4j_export/
+  4. Save the CSV files to neo4j_export/
 
 Usage: python pipeline/03_build_graph_csvs.py
 """
 
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-from scipy.cluster.hierarchy import fcluster, linkage
-from scipy.spatial.distance import squareform
 
 # --- Configuration ---
 METADATA_CSV  = Path.home() / "metadata_cleaned.csv"
@@ -44,10 +39,6 @@ MIN_PCT_MAPPED = 90
 
 # Resistance categories from TB-Profiler drtype (WHO 2021 definitions)
 RR_TYPES = {"RR-TB", "MDR-TB", "Pre-XDR-TB", "XDR-TB"}   # rifampicin resistant
-
-# Similarity groups: maximum pairwise SNP distance (single linkage)
-SNP_THRESHOLD  = 12
-CLUSTER_METHOD = "resistance_loci_snp_distance"
 
 # WHO 2022 drug classification (Consolidated guidelines, Module 4: Treatment).
 # First-line drugs for drug-susceptible TB, then WHO groups A/B/C for
@@ -225,11 +216,6 @@ def build_mut_rows(biosample_id, run_id, data):
     return rows
 
 
-def similarity_row(biosample_id, cluster_id, size):
-    return {"biosample_id": biosample_id, "cluster_id": cluster_id, "cluster_size": size,
-            "snp_threshold": SNP_THRESHOLD, "method": CLUSTER_METHOD}
-
-
 def first_value(series):
     """First non-empty value of a metadata column ('' if there is none)."""
     values = series[series.fillna("").astype(str).str.strip() != ""]
@@ -242,17 +228,16 @@ def main():
     JSON_CACHE.mkdir(exist_ok=True)
 
     # Step 1: New runs, metadata and TB-Profiler results
-    if not NEW_RUNS_FILE.exists() or NEW_RUNS_FILE.stat().st_size == 0:
-        log("new_runs.txt is empty. No new samples to process.")
-        sys.exit(0)
-
-    new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
+    new_runs = set()
+    if NEW_RUNS_FILE.exists():
+        new_runs = {r.strip() for r in NEW_RUNS_FILE.read_text().splitlines() if r.strip()}
     log(f"New runs to process: {len(new_runs)}")
 
     # Metadata: one row per run (the most complete row when a run is duplicated).
-    # Rows without a run (BioSamples with no SRA data) are not part of the graph.
-    df_meta = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
-    df_meta = df_meta[df_meta["Run"].str.strip() != ""].copy()
+    # BioSamples with no run row are kept apart: they become BioSample nodes without SRA data.
+    df_all  = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
+    df_all["BioSampleID"] = df_all["BioSampleID"].str.strip()
+    df_meta = df_all[df_all["Run"].str.strip() != ""].copy()
     df_meta["Run"] = df_meta["Run"].str.strip()
     df_meta = (df_meta
                .assign(_c=(df_meta != "").sum(axis=1))
@@ -262,9 +247,13 @@ def main():
     runs_by_biosample = df_meta.groupby("BioSampleID")["Run"].apply(list).to_dict()
     biosample_of_run  = dict(zip(df_meta["Run"], df_meta["BioSampleID"]))
     meta_by_run       = df_meta.set_index("Run")
+    no_run_rows       = (df_all[~df_all["BioSampleID"].isin(runs_by_biosample)
+                                & (df_all["BioSampleID"] != "")]
+                         .drop_duplicates(subset="BioSampleID")
+                         .set_index("BioSampleID"))
 
     # All JSONs (historical + new) are loaded: the best run of a BioSample may be
-    # an older one, and similarity groups use every BioSample.
+    # an older one.
     log("Loading JSONs from the local cache...")
     all_json_files = list(JSON_CACHE.glob("*.results.json"))
     log(f"Total JSONs in cache: {len(all_json_files)}")
@@ -299,8 +288,11 @@ def main():
         log(f"  {bs}: {len(runs)} runs, {sum(r in all_data for r in runs)} with results "
             f"-> selected {best_run[bs]}")
 
-    # BioSamples to (re)build: those with at least one new run
-    affected = sorted({biosample_of_run[r] for r in new_runs if r in biosample_of_run})
+    # BioSamples to (re)build: those with at least one new run, plus every BioSample
+    # without a run (only metadata, cheap to rebuild; this also loads new ones)
+    affected = sorted({biosample_of_run[r] for r in new_runs if r in biosample_of_run}
+                      | set(no_run_rows.index))
+    log(f"BioSamples without a run: {len(no_run_rows)}")
     unknown  = new_runs - set(biosample_of_run)
     if unknown:
         log(f"  Warning: {len(unknown)} new runs are not in metadata_cleaned.csv (ignored)")
@@ -311,10 +303,15 @@ def main():
     biosample_rows, run_rows, mut_rows = [], [], []
 
     for bs in affected:
-        runs = runs_by_biosample[bs]
-        best = best_run[bs]
+        runs = runs_by_biosample.get(bs, [])
+        best = best_run.get(bs)
         # Metadata from the selected run (or the most complete row if there is none)
-        meta_rows = meta_by_run.loc[[best]] if best else meta_by_run.loc[runs]
+        if best:
+            meta_rows = meta_by_run.loc[[best]]
+        elif runs:
+            meta_rows = meta_by_run.loc[runs]
+        else:
+            meta_rows = no_run_rows.loc[[bs]]
         row = {"biosample_id"     : bs,
                "selected_run"     : best or "",
                "n_runs"           : len(runs),
@@ -337,6 +334,9 @@ def main():
                              "tb_profiler_version": row["tb_profiler_version"],
                              "db_version": row["db_version"]})
             mut_rows.extend(build_mut_rows(bs, best, data))
+        elif not runs:
+            row.update({"processing_status": "no_run",
+                        "processing_error" : "No WGS run with reads in SRA"})
         else:
             spots = (pd.to_numeric(meta_rows["spots"], errors="coerce").fillna(0)
                      if "spots" in meta_rows.columns else pd.Series([0]))
@@ -350,6 +350,10 @@ def main():
         biosample_rows.append(row)
 
     node_biosample = pd.DataFrame(biosample_rows)
+    # Same columns even when no BioSample in this batch has a TB-Profiler result
+    for col in build_summary({}):
+        if col not in node_biosample.columns:
+            node_biosample[col] = ""
     node_run       = pd.DataFrame(run_rows)
     df_mut         = pd.DataFrame(mut_rows) if mut_rows else pd.DataFrame()
     if not node_biosample.empty:
@@ -380,113 +384,7 @@ def main():
     else:
         node_mut = node_drug = rel_has_mut = rel_res = pd.DataFrame()
 
-    # Step 4: Resistance-region similarity groups, recalculated with all BioSamples
-    #
-    # Method note: distances count differences in the variants TB-Profiler reports
-    # (dr_variants + other_variants), which only cover the loci in its resistance
-    # database (~70 genes), NOT the whole genome. Groups therefore reflect similar
-    # resistance-region genotypes and must NOT be interpreted as transmission
-    # clusters, which require genome-wide SNP distances.
-    # Only the selected run of each QC-passed BioSample is used.
-    log("\n2. Recalculating similarity groups (resistance regions)...")
-
-    qc_pass_bs   = sorted(bs for bs, run in best_run.items() if run and passes_qc(all_data[run]))
-    variant_rows = []
-    for bs in qc_pass_bs:
-        data = all_data[best_run[bs]]
-        for var in data.get("dr_variants", []) + data.get("other_variants", []):
-            gene   = var.get("gene_name", "")
-            change = var.get("nucleotide_change", "") or var.get("protein_change", "")
-            if gene and change:
-                variant_rows.append({"sample": bs, "variant_key": f"{gene}_{change}"})
-
-    cluster_rows  = []
-    pairwise_rows = []
-    affected_set  = set(affected)
-
-    if variant_rows:
-        # Presence/absence matrix: BioSamples x variants
-        df_var = pd.DataFrame(variant_rows)
-        df_var["present"] = 1
-        matrix = (df_var
-                  .pivot_table(index="sample", columns="variant_key",
-                               values="present", fill_value=0)
-                  .astype(np.int8))
-        samples = matrix.index.tolist()
-        arr = matrix.values
-        n   = len(samples)
-        log(f"  Matrix: {n} BioSamples x {matrix.shape[1]} variants")
-
-        dist_matrix = np.zeros((n, n), dtype=np.int32)
-        for i in range(n):
-            diff = (arr[i] != arr[i + 1:]).sum(axis=1)
-            dist_matrix[i, i + 1:] = diff
-            dist_matrix[i + 1:, i] = diff
-
-        # Pairwise distances involving rebuilt BioSamples (each pair once, up to 5x the threshold)
-        new_indices = [i for i, s in enumerate(samples) if s in affected_set]
-        seen_pairs  = set()
-        for i in new_indices:
-            for j in range(n):
-                if i == j:
-                    continue
-                a, b = sorted((samples[i], samples[j]))
-                if (a, b) in seen_pairs:
-                    continue
-                seen_pairs.add((a, b))
-                d = int(dist_matrix[i, j])
-                if d <= SNP_THRESHOLD * 5:
-                    pairwise_rows.append({
-                        "sample_a": a,
-                        "sample_b": b,
-                        "snp_dist": d,
-                        "linked"  : "Yes" if d <= SNP_THRESHOLD else "No",
-                    })
-
-        # Single-linkage grouping at SNP_THRESHOLD (needs at least two BioSamples)
-        labels = (fcluster(linkage(squareform(dist_matrix), method="single"),
-                           t=SNP_THRESHOLD, criterion="distance") if n > 1 else [1] * n)
-        members_by_label = {}
-        for bs, label in zip(samples, labels):
-            members_by_label.setdefault(label, []).append(bs)
-
-        grouped = set()
-        for members in members_by_label.values():
-            if len(members) == 1:
-                continue
-            # Group ID = first member BioSample ID in alphabetical order. Unlike a counter
-            # (C0001, C0002...), it stays the same between runs unless the group changes.
-            cluster_id = f"CL_{min(members)}"
-            for bs in members:
-                cluster_rows.append(similarity_row(bs, cluster_id, len(members)))
-                grouped.add(bs)
-
-        for bs in qc_pass_bs:
-            if bs not in grouped:
-                cluster_rows.append(similarity_row(bs, "singleton", 1))
-
-        in_groups = [r for r in cluster_rows if r["cluster_id"] != "singleton"]
-        log(f"  BioSamples in groups : {len(in_groups)}")
-        log(f"  Distinct groups      : {len({r['cluster_id'] for r in in_groups})}")
-        log(f"  Singletons           : {len(cluster_rows) - len(in_groups)}")
-    else:
-        log("  No variants available - all BioSamples marked as singletons")
-        for bs in qc_pass_bs:
-            cluster_rows.append(similarity_row(bs, "singleton", 1))
-
-    df_clusters = pd.DataFrame(cluster_rows)
-    df_pairwise = pd.DataFrame(pairwise_rows)
-    df_linked   = (df_pairwise[df_pairwise["linked"] == "Yes"][["sample_a", "sample_b", "snp_dist"]]
-                   if not df_pairwise.empty else pd.DataFrame())
-
-    # Add the group of each rebuilt BioSample to its node
-    if not df_clusters.empty and not node_biosample.empty:
-        node_biosample = node_biosample.merge(
-            df_clusters[df_clusters["biosample_id"].isin(affected_set)]
-            [["biosample_id", "cluster_id", "cluster_size"]],
-            on="biosample_id", how="left")
-
-    # Step 5: Save CSVs (files from a previous run are removed first, so an
+    # Step 4: Save CSVs (files from a previous run are removed first, so an
     # empty table never leaves an old file behind)
     log("\n3. Saving CSVs to ~/neo4j_export/...")
     for old in OUTPUT_DIR.glob("*.csv"):
@@ -499,9 +397,6 @@ def main():
         "neo4j_rel_has_mutation.csv"    : rel_has_mut,
         "neo4j_rel_resistant_to.csv"    : rel_res,
         "mutation_details.csv"          : df_mut,
-        "resistance_region_clusters.csv": df_clusters,
-        "pairwise_snp_distances.csv"    : df_pairwise,
-        "neo4j_rel_linked_to.csv"       : df_linked,
     }
     for fname, df in files.items():
         if df is not None and not df.empty:
