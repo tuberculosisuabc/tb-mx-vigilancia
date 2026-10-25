@@ -43,6 +43,7 @@ def get_kpis() -> dict:
     # Una muestra = un BioSample; sus resultados vienen del mejor run (ver pipeline/03)
     rows = query("""
         MATCH (s:BioSample)
+        WHERE coalesce(s.is_mtb, 'Yes') = 'Yes'
         RETURN
           count(s)                                             AS total,
           sum(CASE WHEN s.is_mdr  = 'Yes' THEN 1 ELSE 0 END) AS mdr,
@@ -69,11 +70,11 @@ def get_data_overview() -> dict:
             sum(CASE WHEN s.processing_status = 'failed'   THEN 1 ELSE 0 END) AS failed,
             sum(CASE WHEN s.processing_status = 'no_data'  THEN 1 ELSE 0 END) AS no_data,
             sum(CASE WHEN s.processing_status = 'no_run'   THEN 1 ELSE 0 END) AS no_run,
-            sum(CASE WHEN s.qc_pass = 'PASS' THEN 1 ELSE 0 END)               AS qc_pass,
+            sum(CASE WHEN s.qc_pass = 'PASS' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS qc_pass,
             sum(CASE WHEN s.qc_pass = 'FAIL' THEN 1 ELSE 0 END)               AS qc_fail,
             sum(CASE WHEN s.is_mtb  = 'No'   THEN 1 ELSE 0 END)               AS no_mtb,
-            sum(CASE WHEN s.is_mdr  = 'Yes'  THEN 1 ELSE 0 END)               AS mdr,
-            sum(CASE WHEN s.is_xdr  = 'Yes'  THEN 1 ELSE 0 END)               AS xdr,
+            sum(CASE WHEN s.is_mdr  = 'Yes' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS mdr,
+            sum(CASE WHEN s.is_xdr  = 'Yes' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS xdr,
             sum(coalesce(s.n_runs, 0))                                        AS total_runs
     """)[0]
     s["mdr_rate"] = round(s["mdr"] / s["qc_pass"] * 100, 1) if s["qc_pass"] else 0
@@ -101,7 +102,7 @@ def get_mdr_trend() -> list[dict]:
 def get_lineage_dist() -> list[dict]:
     return query("""
         MATCH (l:Lineage)
-        OPTIONAL MATCH (s:BioSample {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
+        OPTIONAL MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:BELONGS_TO]->(l)
         WITH l, collect(DISTINCT s.sub_lineage) AS subs
         RETURN l.lineage_id AS lineage, l.sample_count AS count,
                l.top_level AS top_level, l.description AS description,
@@ -113,7 +114,7 @@ def get_lineage_dist() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_lineage_by_year() -> list[dict]:
     return query("""
-        MATCH (s:BioSample {qc_pass: 'PASS'})-[:BELONGS_TO]->(lin:Lineage),
+        MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:BELONGS_TO]->(lin:Lineage),
               (s)-[:DETECTED_IN]->(t:TimePoint)
         RETURN t.year AS year, lin.top_level AS lineage, count(s) AS n
         ORDER BY year, n DESC
@@ -126,7 +127,7 @@ def get_lineage_by_year() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_cases_by_state() -> list[dict]:
     return query("""
-        MATCH (s:BioSample {qc_pass: 'PASS'})-[:COLLECTED_IN]->(l:Location)
+        MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:COLLECTED_IN]->(l:Location)
         WHERE l.state <> ''
         RETURN l.state AS state,
                count(s) AS total,
@@ -146,8 +147,9 @@ def get_resistance_profile() -> list[dict]:
     return query("""
         MATCH (s:BioSample)
         WHERE s.drtype IS NOT NULL AND s.drtype <> '' AND s.drtype <> 'Low_coverage'
+          AND s.is_mtb = 'Yes'
         RETURN
-            CASE WHEN s.is_mtb = 'No' THEN 'No-Mtb' ELSE s.drtype END AS drtype,
+            s.drtype AS drtype,
             count(s) AS count
         ORDER BY count DESC
     """)
@@ -156,7 +158,7 @@ def get_resistance_profile() -> list[dict]:
 @st.cache_data(ttl=3600)
 def get_drug_resistance_counts() -> list[dict]:
     return query("""
-        MATCH (s:BioSample)-[:RESISTANT_TO]->(d:Drug)
+        MATCH (s:BioSample {is_mtb: 'Yes'})-[:RESISTANT_TO]->(d:Drug)
         RETURN d.name AS drug, d.drug_class AS drug_class, count(s) AS count
         ORDER BY count DESC
     """)
@@ -170,7 +172,7 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
     """Mutaciones de resistencia más frecuentes. Si se indican fármacos, el top N
     se calcula solo entre las mutaciones asociadas a esos fármacos."""
     return query("""
-        MATCH (s:BioSample)-[:HAS_MUTATION]->(m:Mutation)
+        MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation)
         WHERE m.variant_class = 'dr_variant'
           AND m.gene IS NOT NULL AND m.gene <> ''
           AND (size($drugs) = 0 OR m.drug IN $drugs)
@@ -191,7 +193,7 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
 def get_mutation_network(min_samples: int = 5) -> list[dict]:
     """Nodos y aristas de la red mutación–fármaco."""
     return query("""
-        MATCH (s:BioSample)-[:HAS_MUTATION]->(m:Mutation),
+        MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation),
               (s)-[:RESISTANT_TO]->(d:Drug)
         WHERE m.drug = d.name
           AND m.variant_class = 'dr_variant'
@@ -217,7 +219,8 @@ def get_samples_table(
     year_filter: int = None,
     qc_only: bool = True,
 ) -> list[dict]:
-    where_clauses = []
+    # Los genomas que no son M. tuberculosis (M. bovis) se excluyen de todos los análisis
+    where_clauses = ["coalesce(s.is_mtb, 'Yes') = 'Yes'"]
     params = {}
     if qc_only:
         where_clauses.append("s.qc_pass = 'PASS'")
@@ -277,7 +280,7 @@ def get_states() -> list[str]:
 def get_drtypes() -> list[str]:
     rows = query("""
         MATCH (s:BioSample)
-        WHERE s.drtype IS NOT NULL AND s.drtype <> ''
+        WHERE s.drtype IS NOT NULL AND s.drtype <> '' AND s.is_mtb = 'Yes'
         RETURN DISTINCT s.drtype AS drtype ORDER BY drtype
     """)
     return [r["drtype"] for r in rows]
