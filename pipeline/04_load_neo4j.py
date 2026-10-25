@@ -12,10 +12,9 @@ node, the run selected by 03_build_graph_csvs.py.
   3. SRARun nodes (selected run) and HAS_RUN
   4. Metadata nodes and relationships (Location, BioProject, Host)
   5. Lineage and TimePoint nodes and relationships
-  6. Similarity groups (Cluster nodes, replaced on every run)
-  7. Drugs, mutations and links between BioSamples
-  8. Recalculate aggregated counts (QC-passed BioSamples only)
-  9. Print node and relationship totals
+  6. Drugs and mutations
+  7. Recalculate aggregated counts (QC-passed BioSamples only)
+  8. Print node and relationship totals
 
 Usage: python pipeline/04_load_neo4j.py
 Requires the NEO4J_URI, NEO4J_USER and NEO4J_PASSWORD environment variables.
@@ -58,10 +57,10 @@ LINEAGE_DESC = {
 }
 
 NODE_LABELS = ["BioSample", "SRARun", "Host", "Location", "BioProject",
-               "Lineage", "TimePoint", "Cluster", "Drug", "Mutation"]
+               "Lineage", "TimePoint", "Drug", "Mutation"]
 REL_TYPES   = ["HAS_RUN", "FROM_HOST", "COLLECTED_IN", "PART_OF",
-               "BELONGS_TO", "DETECTED_IN", "IN_CLUSTER",
-               "RESISTANT_TO", "HAS_MUTATION", "CONFERS_RESISTANCE", "LINKED_TO"]
+               "BELONGS_TO", "DETECTED_IN",
+               "RESISTANT_TO", "HAS_MUTATION", "CONFERS_RESISTANCE"]
 
 
 # --- Helpers ---
@@ -164,6 +163,19 @@ def main():
         MATCH (b:BioSample {biosample_id: row.biosample_id})-[r]-()
         DELETE r
     """, ids, "Previous relationships removed")
+
+    # Similarity groups were removed from the model: delete any left in the database
+    # (Cluster nodes with IN_CLUSTER, and LINKED_TO). Does nothing once they are gone.
+    with driver.session() as session:
+        links = session.run("""
+            MATCH ()-[r:LINKED_TO]->() DELETE r RETURN count(*) AS n
+        """).single()["n"]
+        clusters = session.run("""
+            MATCH (c:Cluster) DETACH DELETE c RETURN count(*) AS n
+        """).single()["n"]
+        if clusters or links:
+            log(f"  Removed old similarity groups: {clusters} Cluster nodes, "
+                f"{links} LINKED_TO relationships")
 
     # Step 2: BioSample nodes. Every property is written on every load, so values
     # from a replaced run never stay behind (empty values become null).
@@ -285,42 +297,8 @@ def main():
             MERGE (b)-[:DETECTED_IN]->(t)
         """, detected_in_rows, "TimePoint + DETECTED_IN")
 
-    # Step 6: Similarity groups
-    # Groups are recalculated from ALL BioSamples on every run, so the previous
-    # Cluster nodes and IN_CLUSTER relationships are replaced.
-    step("STEP 6: Similarity groups (Cluster)")
-
-    cluster_rows_csv = read_csv("resistance_region_clusters.csv")
-    grouped = [r for r in cluster_rows_csv if r.get("cluster_id") not in (None, "singleton")]
-
-    if cluster_rows_csv:
-        with driver.session() as session:
-            session.run("MATCH (c:Cluster) DETACH DELETE c")
-        log("  Previous groups removed")
-
-    if grouped:
-        cluster_info = {r["cluster_id"]: r for r in grouped}
-        cn_rows = [{"cluster_id": cid, "size": r.get("cluster_size"),
-                    "method": r.get("method"), "snp_threshold": r.get("snp_threshold")}
-                   for cid, r in cluster_info.items()]
-        run_batch(sf, """
-            UNWIND $rows AS row
-            MERGE (c:Cluster {cluster_id: row.cluster_id})
-            SET c.size          = toInteger(row.size),
-                c.method        = row.method,
-                c.snp_threshold = toInteger(row.snp_threshold)
-        """, cn_rows, "Cluster nodes")
-
-        run_batch(sf, """
-            UNWIND $rows AS row
-            MATCH (b:BioSample {biosample_id: row.biosample_id})
-            MATCH (c:Cluster   {cluster_id:   row.cluster_id})
-            MERGE (b)-[:IN_CLUSTER]->(c)
-        """, [{"biosample_id": r["biosample_id"], "cluster_id": r["cluster_id"]} for r in grouped],
-            "IN_CLUSTER rels")
-
-    # Step 7: Drugs, mutations and links
-    step("STEP 7: Drugs, mutations and links")
+    # Step 6: Drugs and mutations
+    step("STEP 6: Drugs and mutations")
 
     drug_rows = read_csv("neo4j_nodes_drug.csv")
     if drug_rows:
@@ -381,18 +359,8 @@ def main():
                 r.who_confidence = row.who_confidence
         """, [r for r in mut_rows if r.get("drug")], "CONFERS_RESISTANCE rels")
 
-    linked_rows = read_csv("neo4j_rel_linked_to.csv")
-    if linked_rows:
-        run_batch(sf, """
-            UNWIND $rows AS row
-            MATCH (a:BioSample {biosample_id: row.sample_a})
-            MATCH (b:BioSample {biosample_id: row.sample_b})
-            MERGE (a)-[rel:LINKED_TO]->(b)
-            SET rel.snp_dist = toInteger(row.snp_dist)
-        """, linked_rows, "LINKED_TO rels")
-
-    # Step 8: Aggregated counts (QC-passed BioSamples only)
-    step("STEP 8: Recalculating aggregated counts")
+    # Step 7: Aggregated counts (QC-passed BioSamples only)
+    step("STEP 7: Recalculating aggregated counts")
 
     with driver.session() as session:
         session.run("""
@@ -422,16 +390,8 @@ def main():
         """)
         log("  TimePoint counts updated")
 
-        session.run("""
-            MATCH (c:Cluster)
-            OPTIONAL MATCH (b:BioSample)-[:IN_CLUSTER]->(c)
-            WITH c, count(b) AS cnt
-            SET c.size = cnt
-        """)
-        log("  Cluster.size updated")
-
-    # Step 9: Totals
-    step("STEP 9: Neo4j totals after the update")
+    # Step 8: Totals
+    step("STEP 8: Neo4j totals after the update")
 
     with driver.session() as session:
         log(f"\n  {'NODE':<25} {'TOTAL':>6}")
