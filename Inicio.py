@@ -41,7 +41,7 @@ with st.spinner("Cargando datos..."):
 # (valor, etiqueta, clase de color, descripción al pasar el cursor)
 overview_cards = [
     (overview["total_biosamples"], "BioSamples",        "kpi-green",
-     "Muestras biológicas de M. tuberculosis de México con al menos un run en SRA"),
+     "Muestras biológicas de M. tuberculosis de México registradas en NCBI, con o sin run en SRA"),
     (overview["with_data"],        "Con lecturas",      "kpi-green",
      "BioSamples con lecturas disponibles en SRA"),
     (overview["processed"],        "Analizados",        "kpi-green",
@@ -95,6 +95,8 @@ with ov_right:
          "BioSamples con error en la descarga o en TB-Profiler"),
         ("Sin lecturas",   overview["no_data"],                      "#B0A898",
          "BioSamples cuyos runs no tienen datos en SRA (spots = 0)"),
+        ("Sin run en SRA", overview.get("no_run", 0),                "#D8D2C8",
+         "BioSamples sin run de secuenciación (WGS) publicado en SRA"),
     ]
 
     def pct(v):
