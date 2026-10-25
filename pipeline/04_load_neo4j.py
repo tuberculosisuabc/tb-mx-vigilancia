@@ -164,19 +164,6 @@ def main():
         DELETE r
     """, ids, "Previous relationships removed")
 
-    # Similarity groups were removed from the model: delete any left in the database
-    # (Cluster nodes with IN_CLUSTER, and LINKED_TO). Does nothing once they are gone.
-    with driver.session() as session:
-        links = session.run("""
-            MATCH ()-[r:LINKED_TO]->() DELETE r RETURN count(*) AS n
-        """).single()["n"]
-        clusters = session.run("""
-            MATCH (c:Cluster) DETACH DELETE c RETURN count(*) AS n
-        """).single()["n"]
-        if clusters or links:
-            log(f"  Removed old similarity groups: {clusters} Cluster nodes, "
-                f"{links} LINKED_TO relationships")
-
     # Step 2: BioSample nodes. Every property is written on every load, so values
     # from a replaced run never stay behind (empty values become null).
     step("STEP 2: BioSample nodes")
@@ -359,13 +346,14 @@ def main():
                 r.who_confidence = row.who_confidence
         """, [r for r in mut_rows if r.get("drug")], "CONFERS_RESISTANCE rels")
 
-    # Step 7: Aggregated counts (QC-passed BioSamples only)
+    # Step 7: Aggregated counts (QC-passed M. tuberculosis BioSamples only; M. bovis
+    # genomes are kept in the graph but excluded from every statistic)
     step("STEP 7: Recalculating aggregated counts")
 
     with driver.session() as session:
         session.run("""
             MATCH (l:Lineage)
-            OPTIONAL MATCH (b:BioSample {qc_pass: 'PASS'})-[:BELONGS_TO]->(l)
+            OPTIONAL MATCH (b:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:BELONGS_TO]->(l)
             WITH l, count(b) AS cnt
             SET l.sample_count = cnt
         """)
@@ -373,7 +361,7 @@ def main():
 
         session.run("""
             MATCH (t:TimePoint)
-            OPTIONAL MATCH (b:BioSample {qc_pass: 'PASS'})-[:DETECTED_IN]->(t)
+            OPTIONAL MATCH (b:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:DETECTED_IN]->(t)
             WITH t,
                  count(b) AS total,
                  sum(CASE WHEN b.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr_cnt,
