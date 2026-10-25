@@ -3,7 +3,8 @@
 Step 1 - Fetch new M. tuberculosis samples from NCBI.
 
   1. Load the existing metadata (metadata_cleaned.csv)
-  2. Search BioSample for M. tuberculosis isolates from Mexico
+  2. Search BioSample for M. tuberculosis isolates from Mexico (and keep only those
+     whose geo_loc_name country is Mexico)
   3. Download the XML of BioSamples not yet in the metadata, and of BioSamples
      saved before without a run (to check whether their runs are public now)
   4. Search SRA and download run info for those BioSamples
@@ -265,6 +266,18 @@ def main():
             flat_samples.append(parse_biosample(bs))
 
     df_bs_new = pd.DataFrame(flat_samples)
+
+    # The text search also matches records that only mention Mexico somewhere (e.g. a
+    # sample from Germany in a Mexican project). Keep only BioSamples whose country in
+    # geo_loc_name is Mexico; records without geo_loc_name are kept.
+    if not df_bs_new.empty and "geo_loc_name" in df_bs_new.columns:
+        country = (df_bs_new["geo_loc_name"].fillna("").astype(str)
+                   .str.split(":").str[0].map(normalize))
+        other_country = (country != "") & (country != "mexico")
+        if other_country.any():
+            log(f"  Excluded {int(other_country.sum())} BioSamples from other countries: "
+                + ", ".join(sorted(set(df_bs_new.loc[other_country, "geo_loc_name"]))))
+            df_bs_new = df_bs_new[~other_country]
     log(f"  BioSamples to check: {len(df_bs_new)} "
         f"({df_bs_new['BioSampleID'].isin(no_run_bs_csv).sum() if not df_bs_new.empty else 0} "
         f"saved before without a run)")
