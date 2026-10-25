@@ -47,7 +47,7 @@ overview_cards = [
     (overview["processed"],        "Analizados",        "kpi-green",
      "BioSamples analizados con TB-Profiler v6 (se usa el mejor run de cada uno)"),
     (overview["qc_pass"],          "QC aprobado",       "kpi-green",
-     "BioSamples con cobertura y mapeo suficiente"),
+     "Genomas de M. tuberculosis con cobertura y mapeo suficiente (base de todos los análisis)"),
     (overview["mdr"],              "TB-MDR",            "kpi-amber",
      "Muestras con resistencia a rifampicina e isoniacida"),
     (overview["xdr"],              "TB-XDR",            "kpi-red",
@@ -85,12 +85,12 @@ with ov_right:
     # (etiqueta, número de BioSamples, color, descripción para la lista de abajo).
     # Los grupos no se traslapan y suman el total de BioSamples.
     groups = [
-        ("QC aprobado",    overview["qc_pass"] - overview["no_mtb"], "#2D6A4F",
+        ("QC aprobado",    overview["qc_pass"],                      "#2D6A4F",
          "BioSamples de <i>M. tuberculosis</i> con QC aprobado ✓"),
         ("QC rechazado",   overview["qc_fail"],                      "#D4A017",
          "BioSamples con baja cobertura o mapeo insuficiente"),
-        ("M. bovis / BCG", overview["no_mtb"],                       "#8B7355",
-         "BioSamples de <i>M. bovis</i> / BCG (complejo <i>M. tuberculosis</i>)"),
+        ("No M. tuberculosis", overview["no_mtb"],                   "#8B7355",
+         "BioSamples de <i>M. bovis</i> (complejo <i>M. tuberculosis</i>), excluidos de los análisis"),
         ("No procesados",  overview["failed"],                       "#C44B2B",
          "BioSamples con error en la descarga o en TB-Profiler"),
         ("Sin lecturas",   overview["no_data"],                      "#B0A898",
