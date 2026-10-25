@@ -9,6 +9,10 @@ on:
   schedule:
     - cron: '0 6 1 */2 *'       # automático: día 1 de cada dos meses, 06:00 UTC
 
+concurrency: #No permite dos corridas/actualizaciones a la vez
+  group: pipeline-tb-mx
+  cancel-in-progress: false
+  
 jobs:
   pipeline:
     runs-on: ubuntu-latest
@@ -87,12 +91,18 @@ jobs:
       - name: Verificar si hay runs nuevos
         id: check
         run: |
+          PENDING=$(cat ~/pending_runs.txt 2>/dev/null || echo 0)
+          echo "pending=$PENDING" >> $GITHUB_OUTPUT
           if [ -f ~/new_runs.txt ] && [ -s ~/new_runs.txt ]; then
             COUNT=$(wc -l < ~/new_runs.txt | tr -d ' ')
             echo "has_new=true"  >> $GITHUB_OUTPUT
             echo "count=$COUNT"  >> $GITHUB_OUTPUT
-            echo "$COUNT RUNS NUEVOS ENCONTRADOS:"
+            echo "$COUNT RUNS NUEVOS A PROCESAR:"
             cat ~/new_runs.txt
+            # Aviso visible arriba en la corrida (sección Annotations)
+            if [ "$PENDING" -gt 0 ]; then
+              echo "::warning title=Runs pendientes::Se encontraron $((COUNT + PENDING)) runs nuevos; se procesan $COUNT en esta corrida y quedan $PENDING pendientes. El pipeline se relanzará automáticamente al terminar."
+            fi
           else
             echo "has_new=false" >> $GITHUB_OUTPUT
             echo "count=0"       >> $GITHUB_OUTPUT
@@ -139,7 +149,8 @@ jobs:
       - name: Publicar release de datos
         if: steps.check.outputs.has_new == 'true'
         run: |
-          TAG="v$(date +'%Y.%m.%d')-data"
+          # Incluye la hora: si el pipeline se relanza, puede publicar varios releases el mismo día
+          TAG="v$(date +'%Y.%m.%d-%H%M')-data"
           TOTAL=$(ls ~/json_cache/*.results.json | wc -l)
           gh release create "$TAG" \
             --repo ${{ github.repository }} \
@@ -158,7 +169,8 @@ jobs:
           echo "| Paso | Estado |" >> $GITHUB_STEP_SUMMARY
           echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| JSONs históricos restaurados | ${{ env.json_count }} archivos |" >> $GITHUB_STEP_SUMMARY
-          echo "| Runs nuevos encontrados | ${{ steps.check.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runs nuevos procesados | ${{ steps.check.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Runs pendientes para la siguiente corrida | ${{ steps.check.outputs.pending || 0 }} |" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.check.outputs.has_new }}" = "true" ]; then
             echo "| TB-Profiler | Ejecutado |" >> $GITHUB_STEP_SUMMARY
             echo "| Neo4j | Actualizado |" >> $GITHUB_STEP_SUMMARY
@@ -166,3 +178,18 @@ jobs:
           else
             echo "| TB-Profiler | Sin muestras nuevas |" >> $GITHUB_STEP_SUMMARY
           fi
+          if [ "${{ steps.check.outputs.pending || 0 }}" -gt 0 ]; then
+            echo "| Relanzamiento | Automático si la corrida terminó bien (ver último paso) |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # --- 6. Relanzar si quedaron runs pendientes ---
+      # Solo si toda la corrida terminó bien; si algo falló, no se relanza para no repetir el error.
+      - name: Relanzar el pipeline para los runs pendientes
+        if: success() && steps.check.outputs.has_new == 'true' && steps.check.outputs.pending != '0'
+        run: |
+          gh workflow run pipeline.yml --repo ${{ github.repository }} --ref ${{ github.ref_name }}
+          echo "Pipeline relanzado: quedan ${{ steps.check.outputs.pending }} runs pendientes"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        
