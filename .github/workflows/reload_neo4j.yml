@@ -27,7 +27,7 @@ jobs:
           cache: pip
 
       - name: Instalar dependencias de Python
-        run: pip install neo4j pandas scipy numpy
+        run: pip install neo4j pandas
 
       # Mismo criterio que "Actualizar pipeline TB-MX": el release de datos más reciente,
       # que contiene todos los resultados (históricos + los de cada actualización)
