@@ -1,15 +1,12 @@
 name: Recargar datos históricos en Neo4j
 
-# Reconstruye el grafo a partir de los resultados de TB-Profiler del último release
-# de datos y de metadata_cleaned.csv. Se borra todo el grafo antes de cargar para evitar duplicados
+# Reconstruye el grafo desde cero a partir de los resultados de TB-Profiler del último
+# release de datos y de metadata_cleaned.csv. Siempre borra todo el grafo antes de cargar,
+# para no dejar nodos de versiones anteriores. El borrado ocurre después de generar los
+# CSV: si ese paso falla, la base queda intacta.
 
 on:
   workflow_dispatch:
-    inputs:
-      vaciar_base:
-        description: "Borrar TODO el grafo de Neo4j antes de recargar"
-        type: boolean
-        default: false
 
 jobs:
   reload:
@@ -88,7 +85,6 @@ jobs:
         run: python pipeline/03_build_graph_csvs.py
 
       - name: Vaciar la base de datos
-        if: inputs.vaciar_base
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
@@ -133,4 +129,3 @@ jobs:
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| JSONs en cache | $JSON_COUNT |" >> $GITHUB_STEP_SUMMARY
           echo "| Runs en la metadata | $RUNS_COUNT |" >> $GITHUB_STEP_SUMMARY
-          echo "| Base vaciada antes de cargar | ${{ inputs.vaciar_base }} |" >> $GITHUB_STEP_SUMMARY
