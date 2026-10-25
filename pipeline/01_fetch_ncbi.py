@@ -4,11 +4,15 @@ Step 1 - Fetch new M. tuberculosis samples from NCBI.
 
   1. Load the existing metadata (metadata_cleaned.csv)
   2. Search BioSample for M. tuberculosis isolates from Mexico
-  3. Download the XML of BioSamples not yet in the metadata
+  3. Download the XML of BioSamples not yet in the metadata, and of BioSamples
+     saved before without a run (to check whether their runs are public now)
   4. Search SRA and download run info for those BioSamples
-  5. Merge BioSample + SRA, keep WGS runs with data, drop laboratory strains
+  5. Merge BioSample + SRA, keep WGS runs with data, drop laboratory strains,
+     and keep at most MAX_RUNS runs (the rest are left for the next run)
   6. Assign the state and its coordinates from geo_loc_name
-  7. Append the new rows to metadata_cleaned.csv
+  7. Append the new rows to metadata_cleaned.csv. BioSamples without a usable run
+     are saved as one row with an empty Run, so they appear in Neo4j as BioSamples
+     without SRA data
   8. Write the run IDs to process to new_runs.txt
 
 Usage: python pipeline/01_fetch_ncbi.py
@@ -30,8 +34,10 @@ Entrez.email  = "daniela.santana@uabc.edu.mx"
 METADATA_CSV  = Path.home() / "metadata_cleaned.csv"
 NEW_RUNS_FILE = Path.home() / "new_runs.txt"
 PENDING_FILE  = Path.home() / "pending_runs.txt"   # runs left for the next run (a number)
+NO_RUN_FILE   = Path.home() / "new_no_run_biosamples.txt"   # BioSamples without run added (a number)
 RETMAX = 2000
 BATCH_SIZE    = 200      # BioSamples per efetch request
+SRA_BATCH     = 100      # BioSamples per SRA search (keeps the query short)
 MAX_RUNS = 25 #Max samples to process to stay under github limit of  6 hours
 
 BIOSAMPLE_QUERY = (
@@ -187,6 +193,7 @@ def finish_without_new_runs(message):
     log(message)
     NEW_RUNS_FILE.write_text("")
     PENDING_FILE.write_text("0\n")
+    NO_RUN_FILE.write_text("0\n")
     sys.exit(0)
 
 
@@ -213,16 +220,22 @@ def main():
     log("TB-MX: NCBI search")
     log("=" * 60)
 
-    # Step 1: Load existing metadata
+    # Step 1: Load existing metadata.
+    # Only BioSamples that already have a run count as "existing": BioSamples saved
+    # without a run are downloaded again on every run, so their runs are picked up
+    # as soon as NCBI publishes them.
     existing_runs = set()
     existing_bs   = set()
+    no_run_bs_csv = set()
     df_existing   = pd.DataFrame()
     if METADATA_CSV.exists():
         df_existing   = pd.read_csv(METADATA_CSV, dtype=str).fillna("")
-        existing_runs = set(df_existing["Run"].str.strip())
-        existing_bs   = set(df_existing["BioSampleID"].str.strip())
+        has_run       = df_existing["Run"].str.strip() != ""
+        existing_runs = set(df_existing.loc[has_run, "Run"].str.strip())
+        existing_bs   = set(df_existing.loc[has_run, "BioSampleID"].str.strip())
+        no_run_bs_csv = set(df_existing["BioSampleID"].str.strip()) - existing_bs
         log(f"Existing CSV: {len(df_existing)} rows | {len(existing_runs)} runs | "
-            f"{len(existing_bs)} BioSamples")
+            f"{len(existing_bs)} BioSamples with runs | {len(no_run_bs_csv)} without runs")
     else:
         log("No existing CSV (it will be created from scratch)")
 
@@ -248,27 +261,44 @@ def main():
         root = ET.fromstring(handle.read()); handle.close()
         for bs in root.findall(".//BioSample"):
             if bs.attrib.get("accession") in existing_bs:
-                continue      # already in metadata_cleaned.csv
+                continue      # already in metadata_cleaned.csv with its runs
             flat_samples.append(parse_biosample(bs))
 
     df_bs_new = pd.DataFrame(flat_samples)
-    log(f"  New BioSamples: {len(df_bs_new)}")
+    log(f"  BioSamples to check: {len(df_bs_new)} "
+        f"({df_bs_new['BioSampleID'].isin(no_run_bs_csv).sum() if not df_bs_new.empty else 0} "
+        f"saved before without a run)")
     if df_bs_new.empty:
         finish_without_new_runs("\nNo new BioSamples. Database is up to date.")
 
     # Step 4: Search SRA and download run info
-    log("\nSearching SRA runs for the new BioSamples...")
-    accessions  = df_bs_new["BioSampleID"].dropna().tolist()
-    search_term = " OR ".join([f'"{a}"[BioSample]' for a in accessions])
-    handle = Entrez.esearch(db="sra", term=search_term, retmax=RETMAX)
-    result = Entrez.read(handle); handle.close()
-    sra_ids = result["IdList"]
+    # In batches, like step 3: one query with hundreds of BioSamples joined by OR
+    # can be too long for NCBI
+    log("\nSearching SRA runs for these BioSamples...")
+    accessions = df_bs_new["BioSampleID"].dropna().tolist()
+    sra_ids = []
+    n_batches = -(-len(accessions) // SRA_BATCH)
+    for i in range(0, len(accessions), SRA_BATCH):
+        batch = accessions[i:i + SRA_BATCH]
+        log(f"  Search batch {i // SRA_BATCH + 1}/{n_batches}: {len(batch)} BioSamples...")
+        time.sleep(0.4)       # stay under NCBI's request rate limit
+        search_term = " OR ".join([f'"{a}"[BioSample]' for a in batch])
+        handle = Entrez.esearch(db="sra", term=search_term, retmax=RETMAX)
+        result = Entrez.read(handle); handle.close()
+        sra_ids.extend(result["IdList"])
+    sra_ids = list(dict.fromkeys(sra_ids))   # remove duplicates, keep order
     log(f"  SRA records found: {len(sra_ids)}")
-    if not sra_ids:
-        finish_without_new_runs("No SRA runs for the new BioSamples.")
 
-    handle = Entrez.efetch(db="sra", id=",".join(sra_ids), rettype="runinfo", retmode="text")
-    df_sra_new = pd.read_csv(StringIO(handle.read().decode("utf-8"))); handle.close()
+    run_tables = []
+    for i in range(0, len(sra_ids), BATCH_SIZE):
+        batch = sra_ids[i:i + BATCH_SIZE]
+        time.sleep(0.4)
+        handle = Entrez.efetch(db="sra", id=",".join(batch), rettype="runinfo", retmode="text")
+        text = handle.read().decode("utf-8"); handle.close()
+        if text.strip():
+            run_tables.append(pd.read_csv(StringIO(text)))
+    df_sra_new = (pd.concat(run_tables, ignore_index=True) if run_tables
+                  else pd.DataFrame(columns=["BioSample", "Run"]))
     log(f"  SRA runs downloaded: {len(df_sra_new)}")
 
     # Step 5: Merge BioSample + SRA and filter
@@ -277,79 +307,104 @@ def main():
                       left_on="BioSampleID", right_on="BioSample", how="left")
     merged = drop_similar_columns(merged, threshold=0.8)
 
-    # Keep whole-genome sequencing runs that contain data
-    if "LibraryStrategy" in merged.columns:
-        merged = merged[merged["LibraryStrategy"] == "WGS"]
-    if "spots" in merged.columns:
-        merged = merged[pd.to_numeric(merged["spots"], errors="coerce").fillna(0) > 0]
-
     # Exclude laboratory reference strains (H37Rv / H37Ra) and in-vitro experiments:
-    # they are not clinical isolates and must not enter surveillance statistics
+    # they are not clinical isolates and must not enter surveillance statistics.
+    # The whole BioSample is excluded, also from the BioSamples without a run.
     lab_mask = pd.Series(False, index=merged.index)
     if "ScientificName" in merged.columns:
         lab_mask |= merged["ScientificName"].fillna("").str.contains(r"H37R[va]", case=False)
     if "isolation_source" in merged.columns:
         lab_mask |= merged["isolation_source"].fillna("").str.contains(
             r"in vitro|laboratory", case=False)
-    if lab_mask.any():
-        log(f"  Excluded {int(lab_mask.sum())} runs from laboratory strains / in-vitro cultures")
-        merged = merged[~lab_mask]
+    lab_bs = set(merged.loc[lab_mask, "BioSampleID"])
+    if lab_bs:
+        log(f"  Excluded {len(lab_bs)} BioSamples from laboratory strains / in-vitro cultures")
+    merged = merged[~merged["BioSampleID"].isin(lab_bs)]
 
-    # Drop runs that are already in the metadata
-    if "Run" in merged.columns:
-        merged = merged[~merged["Run"].isin(existing_runs)]
-    log(f"  New runs after filters: {len(merged)}")
-    if merged.empty:
-        finish_without_new_runs("\nAll runs were already processed. Nothing to update.")
+    # Keep whole-genome sequencing runs that contain data
+    usable = merged
+    if "LibraryStrategy" in usable.columns:
+        usable = usable[usable["LibraryStrategy"] == "WGS"]
+    if "spots" in usable.columns:
+        usable = usable[pd.to_numeric(usable["spots"], errors="coerce").fillna(0) > 0]
+    if "Run" in usable.columns:
+        usable = usable[usable["Run"].fillna("").str.strip() != ""]
+        usable = usable[~usable["Run"].isin(existing_runs)]
+
+    # BioSamples without a usable run (no run in SRA yet, or only non-WGS/empty runs):
+    # saved once as a row without Run. Those already saved are not added again.
+    checked_bs     = set(df_bs_new["BioSampleID"]) - lab_bs
+    no_run_bs      = checked_bs - set(usable["BioSampleID"])
+    new_no_run_bs  = sorted(no_run_bs - no_run_bs_csv)
+    df_no_run      = (df_bs_new[df_bs_new["BioSampleID"].isin(new_no_run_bs)]
+                      .drop_duplicates(subset="BioSampleID").copy())
+    log(f"  New runs after filters      : {usable['Run'].nunique() if 'Run' in usable else 0}")
+    log(f"  BioSamples without a run    : {len(no_run_bs)} ({len(new_no_run_bs)} new)")
 
     # Keep at most MAX_RUNS runs in this pipeline run
-    found = merged["Run"].nunique()
-    merged, pending = limit_runs(merged, MAX_RUNS)
-    if pending:
-        log(f"  Limit of {MAX_RUNS} runs per pipeline run: processing {found - pending}, "
-            f"{pending} left for the next run")
+    pending = 0
+    if not usable.empty:
+        found = usable["Run"].nunique()
+        usable, pending = limit_runs(usable, MAX_RUNS)
+        if pending:
+            log(f"  Limit of {MAX_RUNS} runs per pipeline run: processing {found - pending}, "
+                f"{pending} left for the next run")
+
+    if usable.empty and df_no_run.empty:
+        finish_without_new_runs("\nNothing new: no new runs and no new BioSamples without a run.")
     PENDING_FILE.write_text(f"{pending}\n")
+    NO_RUN_FILE.write_text(f"{len(df_no_run)}\n")
 
     # Step 6: Assign state and coordinates
     log("\nAssigning state and coordinates...")
-    geo_col = next((c for c in merged.columns if "geo_loc" in c.lower()), None)
+    new_rows = pd.concat([usable, df_no_run], ignore_index=True)
+    geo_col = next((c for c in new_rows.columns if "geo_loc" in c.lower()), None)
     if geo_col:
-        geo = merged[geo_col].apply(extract_state)
-        merged["state"] = geo.apply(lambda x: x[0])
-        merged["lat"]   = geo.apply(lambda x: x[1])
-        merged["lon"]   = geo.apply(lambda x: x[2])
+        geo = new_rows[geo_col].apply(extract_state)
+        new_rows["state"] = geo.apply(lambda x: x[0])
+        new_rows["lat"]   = geo.apply(lambda x: x[1])
+        new_rows["lon"]   = geo.apply(lambda x: x[2])
     else:
-        merged["state"] = ""
-        merged["lat"]   = None
-        merged["lon"]   = None
-    log(f"  State identified: {merged['state'].ne('').sum()}/{len(merged)}")
+        new_rows["state"] = ""
+        new_rows["lat"]   = None
+        new_rows["lon"]   = None
+    log(f"  State identified: {new_rows['state'].ne('').sum()}/{len(new_rows)}")
 
-    # Step 7: Append new rows to metadata_cleaned.csv
+    # Step 7: Append new rows to metadata_cleaned.csv. BioSamples that were saved
+    # without a run and now have runs lose their old row without Run.
     log("\nUpdating metadata_cleaned.csv...")
     if not df_existing.empty:
-        all_cols    = list(dict.fromkeys(list(df_existing.columns) + list(merged.columns)))
+        now_with_runs = set(usable["BioSampleID"]) & no_run_bs_csv
+        if now_with_runs:
+            log(f"  {len(now_with_runs)} BioSamples saved without a run now have runs")
+            df_existing = df_existing[~(df_existing["BioSampleID"].isin(now_with_runs)
+                                        & (df_existing["Run"].str.strip() == ""))]
+        all_cols    = list(dict.fromkeys(list(df_existing.columns) + list(new_rows.columns)))
         df_existing = df_existing.reindex(columns=all_cols, fill_value="")
-        merged      = merged.reindex(columns=all_cols, fill_value="")
-        df_updated  = pd.concat([df_existing, merged], ignore_index=True)
+        new_rows    = new_rows.reindex(columns=all_cols, fill_value="")
+        df_updated  = pd.concat([df_existing, new_rows], ignore_index=True)
     else:
-        df_updated = merged.copy()
+        df_updated = new_rows.copy()
     df_updated.to_csv(METADATA_CSV, index=False)
-    log(f"  Total rows in CSV: {len(df_updated)} (+{len(merged)} new)")
+    log(f"  Total rows in CSV: {len(df_updated)} (+{len(usable)} run rows, "
+        f"+{len(df_no_run)} BioSamples without a run)")
 
     # Step 8: Write new_runs.txt
-    new_run_ids = sorted(r.strip() for r in merged["Run"].dropna().tolist()
+    new_run_ids = sorted(r.strip() for r in usable["Run"].dropna().tolist()
                          if str(r).strip().startswith(("SRR", "ERR", "DRR")))
-    NEW_RUNS_FILE.write_text("\n".join(new_run_ids) + "\n")
+    NEW_RUNS_FILE.write_text("\n".join(new_run_ids) + "\n" if new_run_ids else "")
 
     log("\n" + "=" * 60)
     log(f"RESULT: {len(new_run_ids)} new runs to process"
         + (f" ({pending} left for the next run)" if pending else ""))
     for run_id in new_run_ids:
         log(f"  {run_id}")
+    log(f"New BioSamples without a run: {len(df_no_run)}")
     log("\nFiles updated:")
     log(f"  {METADATA_CSV}")
     log(f"  {NEW_RUNS_FILE}")
     log(f"  {PENDING_FILE}")
+    log(f"  {NO_RUN_FILE}")
     log("=" * 60)
 
 
