@@ -55,15 +55,15 @@ section("Nodos y propiedades")
 
 # Esquema tal como lo crea pipeline/04_load_neo4j.py
 nodes_data = pd.DataFrame([
-    ("BioSample",  "biosample_id",  "biosample_id, selected_run, n_runs (int), n_runs_with_result (int), processing_status (ok, failed, no_data, no_run), processing_error, lineage, sub_lineage, drtype, is_rr, is_mdr, is_xdr, is_mtb, species, mixed_infection, resistant_drugs, median_depth, pct_mapped, qc_pass, fail_reasons, qc_warnings, num_dr_variants, num_other_variants, collection_date, isolation_source, tb_profiler_version, db_version"),
-    ("SRARun",     "run_id",        "run_id, spots (int), median_depth, pct_mapped, qc_pass, tb_profiler_version, db_version (solo el run seleccionado de cada BioSample)"),
+    ("BioSample",  "biosample_id",  "biosample_id, selected_run, n_runs (int), n_runs_with_result (int), processing_status (ok, failed, no_data, no_run), processing_error, sub_lineage, drtype, is_rr, is_mdr, is_xdr, is_mtb, species, mixed_infection, qc_pass, collection_date, isolation_source"),
+    ("SRARun",     "run_id",        "run_id, spots (int), median_depth, pct_mapped, qc_pass, fail_reasons, qc_warnings, num_dr_variants (int), num_other_variants (int), tb_profiler_version, db_version (solo el run seleccionado de cada BioSample)"),
     ("Host",       "host_id",       "host_id, host_type, host_sex, host_age, host_disease"),
     ("Location",   "state",         "state, country, lat, lon"),
     ("BioProject", "bioproject_id", "bioproject_id, study_id"),
     ("Lineage",    "lineage_id",    "lineage_id, top_level, description, sample_count (int)"),
     ("TimePoint",  "timepoint_id",  "timepoint_id, year, sample_count, mdr_count, mdr_rate, rr_count, rr_rate"),
     ("Drug",       "name",          "name, drug_class"),
-    ("Mutation",   "mutation_id",   "mutation_id, gene, nt_change, aa_change, variant_type, genome_pos, confidence, who_confidence, variant_class, drug"),
+    ("Mutation",   "mutation_id",   "mutation_id (gen_cambioNT), gene, nt_change, aa_change, variant_type, genome_pos, variant_class (dr_variant / other_variant)"),
 ], columns=["Nodo", "Clave (Key)", "Propiedades"])
 
 st.dataframe(
@@ -83,11 +83,11 @@ rels_data = pd.DataFrame([
     ("BioSample", "[:FROM_HOST]",          "Host",       "—"),
     ("BioSample", "[:COLLECTED_IN]",       "Location",   "—"),
     ("BioSample", "[:PART_OF]",            "BioProject", "—"),
-    ("BioSample", "[:BELONGS_TO]",         "Lineage",    "—"),
+    ("BioSample", "[:BELONGS_TO]",         "Lineage",    "— (linaje principal)"),
     ("BioSample", "[:DETECTED_IN]",        "TimePoint",  "—"),
-    ("BioSample", "[:RESISTANT_TO]",       "Drug",       "confidence, who_confidence"),
-    ("BioSample", "[:HAS_MUTATION]",       "Mutation",   "allele_freq (float), variant_depth (int), drug, variant_class"),
-    ("Mutation",  "[:CONFERS_RESISTANCE]", "Drug",       "confidence, who_confidence"),
+    ("BioSample", "[:RESISTANT_TO]",       "Drug",       "— (resistencia genotípica)"),
+    ("BioSample", "[:HAS_MUTATION]",       "Mutation",   "allele_freq (float), variant_depth (int); todas las variantes"),
+    ("Mutation",  "[:CONFERS_RESISTANCE]", "Drug",       "confidence, who_confidence (catálogo)"),
 ], columns=["Nodo de Origen", "Relación", "Nodo Final", "Propiedades"])
 
 st.dataframe(
@@ -174,7 +174,7 @@ RETURN l.state, count(s) AS total,
 ORDER BY mdr DESC""", language="cypher")
 
     st.markdown("**Mutaciones más frecuentes**")
-    st.code("""MATCH (r:BioSample)-[:HAS_MUTATION]->(m:Mutation)
+    st.code("""MATCH (r:BioSample)-[:HAS_MUTATION]->(m:Mutation {variant_class:'dr_variant'})
 RETURN m.gene, m.aa_change, count(r) AS n
 ORDER BY n DESC LIMIT 10""", language="cypher")
 
