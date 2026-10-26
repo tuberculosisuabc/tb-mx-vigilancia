@@ -5,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from db import get_mutation_network, get_top_dr_mutations
+from db import get_mutation_network, get_other_variants, get_top_dr_mutations
 from utils import (AXIS_GRID, AXIS_PLAIN, BG, DRUG_COLORS, MULTI_DRUG_COLOR, TEXT_DARK, TEXT_MUTED,
                    confidence_es, drug_es, page_header, render_footer, section, setup_page,
                    show_fig, style_fig)
@@ -156,6 +156,45 @@ if not df_mut.empty:
                 "label": "Mutación", "drug": "Fármaco(s)",
                 "confidence": "Confianza (catálogo OMS / TB-Profiler)", "sample_count": "Muestras",
             }),
+            use_container_width=True, hide_index=True,
+        )
+
+# ── Otras variantes en genes de resistencia ──────────────────────────
+section(
+    "Otras variantes en genes de resistencia",
+    """TB-Profiler también reporta variantes en los genes que analiza (~70 genes relacionados con
+    resistencia) que el catálogo <b>no</b> asocia con resistencia: variantes sinónimas, marcadores de
+    linaje o cambios de significado incierto. No se usan para clasificar la resistencia, pero se
+    guardan en la base de datos para consultas posteriores.""",
+)
+VARIANT_TYPES = {
+    "missense_variant":       "Cambio de aminoácido",
+    "synonymous_variant":     "Sinónima",
+    "upstream_gene_variant":  "Región promotora",
+    "frameshift_variant":     "Corrimiento del marco de lectura",
+    "stop_gained":            "Codón de paro",
+    "conservative_inframe_deletion": "Deleción en marco",
+    "disruptive_inframe_deletion":   "Deleción en marco",
+    "conservative_inframe_insertion": "Inserción en marco",
+    "disruptive_inframe_insertion":   "Inserción en marco",
+    "start_lost":             "Pérdida del codón de inicio",
+    "non_coding_transcript_exon_variant": "Gen no codificante",
+}
+otras = get_other_variants(limit=20)
+o1, o2, o3 = st.columns(3)
+o1.metric("Variantes distintas", f"{otras['variantes']:,}")
+o2.metric("Genes", otras["genes"])
+o3.metric("Muestras con al menos una", otras["muestras"])
+if otras["top"]:
+    df_otras = pd.DataFrame(otras["top"])
+    # Tipos compuestos ("frameshift_variant&missense_variant") se traducen por su primer término
+    df_otras["variant_type"] = df_otras["variant_type"].fillna("").map(
+        lambda t: VARIANT_TYPES.get(t.split("&")[0], t))
+    df_otras["mutacion"] = df_otras["gene"] + " " + df_otras["change"].fillna("")
+    with st.expander("Ver las 20 más frecuentes"):
+        st.dataframe(
+            df_otras[["mutacion", "variant_type", "sample_count"]].rename(columns={
+                "mutacion": "Variante", "variant_type": "Tipo", "sample_count": "Muestras"}),
             use_container_width=True, hide_index=True,
         )
 
