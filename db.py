@@ -172,18 +172,18 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
     """Mutaciones de resistencia más frecuentes. Si se indican fármacos, el top N
     se calcula solo entre las mutaciones asociadas a esos fármacos."""
     return query("""
-        MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation)
-        WHERE m.variant_class = 'dr_variant'
-          AND m.gene IS NOT NULL AND m.gene <> ''
-          AND (size($drugs) = 0 OR m.drug IN $drugs)
-        // Una misma mutación puede conferir resistencia a varios fármacos (un nodo
-        // Mutation por fármaco); se agrupan para mostrar una sola barra por mutación
-        WITH m.gene AS gene,
-             CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
-             collect(DISTINCT m.drug)       AS drugs,
-             collect(DISTINCT m.confidence) AS confidences,
+        MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation {variant_class: 'dr_variant'})
+              -[c:CONFERS_RESISTANCE]->(d:Drug)
+        WHERE m.gene IS NOT NULL AND m.gene <> ''
+          AND (size($drugs) = 0 OR d.name IN $drugs)
+        // Un nodo por mutación; los fármacos a los que confiere resistencia son relaciones
+        WITH m,
+             collect(DISTINCT d.name)       AS drugs,
+             collect(DISTINCT c.confidence) AS confidences,
              count(DISTINCT s)              AS sample_count
-        RETURN gene, change, drugs, confidences, sample_count
+        RETURN m.gene AS gene,
+               CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
+               drugs, confidences, sample_count
         ORDER BY sample_count DESC
         LIMIT $limit
     """, {"limit": limit, "drugs": list(drugs)})
@@ -193,11 +193,9 @@ def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
 def get_mutation_network(min_samples: int = 5) -> list[dict]:
     """Nodos y aristas de la red mutación–fármaco."""
     return query("""
-        MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation),
-              (s)-[:RESISTANT_TO]->(d:Drug)
-        WHERE m.drug = d.name
-          AND m.variant_class = 'dr_variant'
-        WITH m, d, count(s) AS n
+        MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation {variant_class: 'dr_variant'})
+              -[:CONFERS_RESISTANCE]->(d:Drug)
+        WITH m, d, count(DISTINCT s) AS n
         WHERE n >= $min_samples
         RETURN m.mutation_id  AS mut_id,
                m.gene         AS gene,
@@ -207,6 +205,29 @@ def get_mutation_network(min_samples: int = 5) -> list[dict]:
                n              AS sample_count
         ORDER BY n DESC
     """, {"min_samples": min_samples})
+
+
+@st.cache_data(ttl=3600)
+def get_other_variants(limit: int = 20) -> dict:
+    """Variantes en genes de resistencia que el catálogo no asocia con resistencia
+    (other_variant): totales y las más frecuentes."""
+    resumen = query("""
+        MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:HAS_MUTATION]->
+              (m:Mutation {variant_class: 'other_variant'})
+        RETURN count(DISTINCT m) AS variantes, count(DISTINCT m.gene) AS genes,
+               count(DISTINCT s) AS muestras
+    """)[0]
+    top = query("""
+        MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:HAS_MUTATION]->
+              (m:Mutation {variant_class: 'other_variant'})
+        WITH m, count(DISTINCT s) AS sample_count
+        RETURN m.gene AS gene,
+               CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
+               m.variant_type AS variant_type, sample_count
+        ORDER BY sample_count DESC, gene
+        LIMIT $limit
+    """, {"limit": limit})
+    return {**resumen, "top": top}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -246,15 +267,20 @@ def get_samples_table(
         OPTIONAL MATCH (s)-[:DETECTED_IN]->(t:TimePoint)
         WITH s, l, lin, t
         {where_str}
+        // Profundidad: propiedad del run seleccionado; fármacos: relaciones RESISTANT_TO
+        OPTIONAL MATCH (s)-[:HAS_RUN]->(r:SRARun)
+        OPTIONAL MATCH (s)-[:RESISTANT_TO]->(d:Drug)
+        WITH s, l, lin, t, r, collect(d.name) AS drugs
         RETURN s.biosample_id     AS sample_id,
                s.selected_run     AS run_id,
                s.drtype           AS drtype,
-               s.lineage          AS lineage,
+               coalesce(lin.lineage_id, s.sub_lineage) AS lineage,
                s.sub_lineage      AS sub_lineage,
                s.is_mdr           AS is_mdr,
                s.is_xdr           AS is_xdr,
-               s.resistant_drugs  AS resistant_drugs,
-               s.median_depth     AS median_depth,
+               reduce(txt = '', x IN drugs |
+                      txt + CASE WHEN txt = '' THEN '' ELSE '; ' END + x) AS resistant_drugs,
+               r.median_depth     AS median_depth,
                s.isolation_source AS isolation_source,
                l.state            AS state,
                t.year             AS year,
