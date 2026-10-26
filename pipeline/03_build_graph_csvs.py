@@ -58,6 +58,10 @@ DRUG_CLASSES = {
     "pretomanid": "bpal_regimen",
 }
 
+# Properties of the selected run (SRARun node): sequencing quality and analysis versions
+RUN_PROPERTIES = ["median_depth", "pct_mapped", "qc_pass", "fail_reasons", "qc_warnings",
+                  "num_dr_variants", "num_other_variants", "tb_profiler_version", "db_version"]
+
 # Metadata columns copied to each BioSample row (CSV column -> output column)
 META_COLUMNS = {
     "state": "state", "lat": "lat", "lon": "lon",
@@ -95,11 +99,10 @@ def select_best_run(runs, all_data):
 
 
 def mutation_id(df):
-    """gene_ntchange_drug. nt_change is used because aa_change is empty for
-    promoter/non-coding variants, which would make different variants share an ID."""
-    return (df["gene"].fillna("") + "_" +
-            df["nt_change"].fillna("") + "_" +
-            df["drug"].fillna("")).str.strip("_")
+    """gene_ntchange: one Mutation node per variant, whatever the number of drugs it
+    affects (the drugs are CONFERS_RESISTANCE relationships). nt_change is used because
+    aa_change is empty for promoter/non-coding variants."""
+    return (df["gene"].fillna("") + "_" + df["nt_change"].fillna("")).str.strip("_")
 
 
 def build_summary(data):
@@ -328,11 +331,9 @@ def main():
             row.update(build_summary(data))
             row.update({"processing_status": "ok", "processing_error": ""})
             spots = meta_by_run.at[best, "spots"] if "spots" in meta_by_run.columns else ""
+            # Sequencing and analysis details belong to the run (SRARun node)
             run_rows.append({"run_id": best, "biosample_id": bs, "spots": spots,
-                             "median_depth": row["median_depth"], "pct_mapped": row["pct_mapped"],
-                             "qc_pass": row["qc_pass"],
-                             "tb_profiler_version": row["tb_profiler_version"],
-                             "db_version": row["db_version"]})
+                             **{k: row[k] for k in RUN_PROPERTIES}})
             mut_rows.extend(build_mut_rows(bs, best, data))
         elif not runs:
             row.update({"processing_status": "no_run",
@@ -362,27 +363,42 @@ def main():
     log(f"  SRARun rows    : {len(node_run)}")
     log(f"  Mutation rows  : {len(df_mut)}")
 
-    # Mutation and Drug nodes, HAS_MUTATION and RESISTANT_TO relationships
+    # Mutation and Drug nodes; HAS_MUTATION, CONFERS_RESISTANCE and RESISTANT_TO relationships
     if not df_mut.empty:
-        node_mut = df_mut[["gene", "nt_change", "aa_change", "variant_type",
-                           "genome_pos", "drug", "confidence", "who_confidence",
-                           "variant_class"]].drop_duplicates()
-        node_mut["mutation_id"] = mutation_id(node_mut)
+        df_mut["mutation_id"] = mutation_id(df_mut)
+        is_dr = df_mut["variant_class"] == "dr_variant"
+
+        # One node per variant. A variant is a resistance variant (dr_variant) if TB-Profiler
+        # links it to any drug; the rest (other_variant) are variants found in the resistance
+        # genes that are not associated with resistance in the catalogue.
+        node_mut = (df_mut.sort_values("genome_pos")
+                    .groupby("mutation_id", as_index=False)
+                    .agg(gene=("gene", "first"), nt_change=("nt_change", "first"),
+                         aa_change=("aa_change", "first"), variant_type=("variant_type", "first"),
+                         genome_pos=("genome_pos", "first"),
+                         variant_class=("variant_class",
+                                        lambda c: "dr_variant" if (c == "dr_variant").any()
+                                        else "other_variant")))
 
         # other_variants have no drug (""), so only real drug names become Drug nodes
         drug_names = df_mut["drug"].dropna()
         node_drug  = pd.DataFrame({"drug": drug_names[drug_names != ""].unique()})
         node_drug["drug_class"] = node_drug["drug"].map(DRUG_CLASSES).fillna("other")
 
-        rel_has_mut = df_mut[df_mut["variant_class"] == "dr_variant"][
-            ["biosample_id", "gene", "nt_change", "aa_change", "drug",
-             "allele_freq", "variant_depth", "variant_class"]].copy()
-        rel_has_mut["mutation_id"] = mutation_id(rel_has_mut)
+        # Every variant of every sample (resistance and other variants), once per pair
+        rel_has_mut = (df_mut[["biosample_id", "mutation_id", "allele_freq", "variant_depth"]]
+                       .drop_duplicates(subset=["biosample_id", "mutation_id"]))
 
-        rel_res = (df_mut[df_mut["drug"] != ""]
-                   [["biosample_id", "drug", "confidence", "who_confidence"]].drop_duplicates())
+        # Mutation -> Drug, with the catalogue confidence of that pair
+        rel_confers = (df_mut[is_dr & (df_mut["drug"] != "")]
+                       [["mutation_id", "drug", "confidence", "who_confidence"]]
+                       .drop_duplicates(subset=["mutation_id", "drug"]))
+
+        # Sample -> Drug (genotypic resistance); the confidence lives on CONFERS_RESISTANCE
+        rel_res = (df_mut[is_dr & (df_mut["drug"] != "")][["biosample_id", "drug"]]
+                   .drop_duplicates())
     else:
-        node_mut = node_drug = rel_has_mut = rel_res = pd.DataFrame()
+        node_mut = node_drug = rel_has_mut = rel_confers = rel_res = pd.DataFrame()
 
     # Step 4: Save CSVs (files from a previous run are removed first, so an
     # empty table never leaves an old file behind)
@@ -396,6 +412,7 @@ def main():
         "neo4j_nodes_drug.csv"          : node_drug,
         "neo4j_rel_has_mutation.csv"    : rel_has_mut,
         "neo4j_rel_resistant_to.csv"    : rel_res,
+        "neo4j_rel_confers_resistance.csv": rel_confers,
         "mutation_details.csv"          : df_mut,
     }
     for fname, df in files.items():
