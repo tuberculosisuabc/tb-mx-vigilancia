@@ -140,6 +140,18 @@ def main():
 
     sf = driver.session  # session factory used by run_batch
 
+    # Unique keys. Each constraint also creates an index, so the MATCH/MERGE lookups
+    # below do not scan every node (important for ~30,000 HAS_MUTATION rows).
+    with driver.session() as session:
+        for label, key in [("BioSample", "biosample_id"), ("SRARun", "run_id"),
+                           ("Host", "host_id"), ("Location", "state"),
+                           ("BioProject", "bioproject_id"), ("Lineage", "lineage_id"),
+                           ("TimePoint", "timepoint_id"), ("Drug", "name"),
+                           ("Mutation", "mutation_id")]:
+            session.run(f"CREATE CONSTRAINT {label.lower()}_{key} IF NOT EXISTS "
+                        f"FOR (n:{label}) REQUIRE n.{key} IS UNIQUE")
+    log("Constraints and indexes ready")
+
     log("\nReading CSVs from neo4j_export/...")
     biosample_rows = read_csv("neo4j_nodes_biosample.csv")
     if not biosample_rows:
@@ -164,8 +176,11 @@ def main():
         DELETE r
     """, ids, "Previous relationships removed")
 
-    # Step 2: BioSample nodes. Every property is written on every load, so values
-    # from a replaced run never stay behind (empty values become null).
+    # Step 2: BioSample nodes: biological sample, metadata and final classification.
+    # Sequencing quality and analysis versions belong to SRARun (step 3); the main lineage
+    # and the resistant drugs are relationships (BELONGS_TO, RESISTANT_TO), not properties.
+    # Every property is written on every load, so values from a replaced run never stay
+    # behind (empty values become null).
     step("STEP 2: BioSample nodes")
     run_batch(sf, """
         UNWIND $rows AS row
@@ -177,7 +192,6 @@ def main():
             b.processing_error    = row.processing_error,
             b.collection_date     = row.collection_date,
             b.isolation_source    = row.isolation_source,
-            b.lineage             = row.lineage,
             b.sub_lineage         = row.sub_lineage,
             b.drtype              = row.drtype,
             b.is_rr               = row.is_rr,
@@ -186,16 +200,8 @@ def main():
             b.is_mtb              = row.is_mtb,
             b.species             = row.species,
             b.mixed_infection     = row.mixed_infection,
-            b.resistant_drugs     = row.resistant_drugs,
-            b.median_depth        = toFloat(row.median_depth),
-            b.pct_mapped          = toFloat(row.pct_mapped),
-            b.qc_pass             = row.qc_pass,
-            b.fail_reasons        = row.fail_reasons,
-            b.qc_warnings         = row.qc_warnings,
-            b.num_dr_variants     = toInteger(row.num_dr_variants),
-            b.num_other_variants  = toInteger(row.num_other_variants),
-            b.tb_profiler_version = row.tb_profiler_version,
-            b.db_version          = row.db_version
+            // qc_pass is also on SRARun; kept here because every statistic filters on it
+            b.qc_pass             = row.qc_pass
     """, biosample_rows, "BioSample nodes")
 
     # Step 3: Selected SRARun nodes
@@ -209,6 +215,10 @@ def main():
                 s.median_depth        = toFloat(row.median_depth),
                 s.pct_mapped          = toFloat(row.pct_mapped),
                 s.qc_pass             = row.qc_pass,
+                s.fail_reasons        = row.fail_reasons,
+                s.qc_warnings         = row.qc_warnings,
+                s.num_dr_variants     = toInteger(row.num_dr_variants),
+                s.num_other_variants  = toInteger(row.num_other_variants),
                 s.tb_profiler_version = row.tb_profiler_version,
                 s.db_version          = row.db_version
             MERGE (b)-[:HAS_RUN]->(s)
@@ -305,10 +315,7 @@ def main():
                 m.nt_change      = coalesce(row.nt_change, ''),
                 m.variant_type   = row.variant_type,
                 m.genome_pos     = toInteger(toFloat(row.genome_pos)),
-                m.confidence     = row.confidence,
-                m.who_confidence = row.who_confidence,
-                m.variant_class  = row.variant_class,
-                m.drug           = coalesce(row.drug, '')
+                m.variant_class  = row.variant_class
         """, mut_rows, "Mutation nodes")
 
     res_rows = read_csv("neo4j_rel_resistant_to.csv")
@@ -317,9 +324,7 @@ def main():
             UNWIND $rows AS row
             MATCH (b:BioSample {biosample_id: row.biosample_id})
             MATCH (d:Drug      {name:         row.drug})
-            MERGE (b)-[rel:RESISTANT_TO]->(d)
-            SET rel.confidence     = row.confidence,
-                rel.who_confidence = row.who_confidence
+            MERGE (b)-[:RESISTANT_TO]->(d)
         """, res_rows, "RESISTANT_TO rels")
 
     hasmut_rows = read_csv("neo4j_rel_has_mutation.csv")
@@ -330,13 +335,12 @@ def main():
             MATCH (m:Mutation  {mutation_id:  row.mutation_id})
             MERGE (b)-[rel:HAS_MUTATION]->(m)
             SET rel.allele_freq   = toFloat(row.allele_freq),
-                rel.variant_depth = toInteger(toFloat(row.variant_depth)),
-                rel.drug          = row.drug,
-                rel.variant_class = row.variant_class
+                rel.variant_depth = toInteger(toFloat(row.variant_depth))
         """, hasmut_rows, "HAS_MUTATION rels")
 
-    # Only resistance mutations have a drug; rows without one find no Drug and are skipped
-    if mut_rows:
+    # Which drugs each resistance mutation affects, with the catalogue confidence
+    confers_rows = read_csv("neo4j_rel_confers_resistance.csv")
+    if confers_rows:
         run_batch(sf, """
             UNWIND $rows AS row
             MATCH (m:Mutation {mutation_id: row.mutation_id})
@@ -344,7 +348,7 @@ def main():
             MERGE (m)-[r:CONFERS_RESISTANCE]->(d)
             SET r.confidence     = row.confidence,
                 r.who_confidence = row.who_confidence
-        """, [r for r in mut_rows if r.get("drug")], "CONFERS_RESISTANCE rels")
+        """, confers_rows, "CONFERS_RESISTANCE rels")
 
     # Step 7: Aggregated counts (QC-passed M. tuberculosis BioSamples only; M. bovis
     # genomes are kept in the graph but excluded from every statistic)
