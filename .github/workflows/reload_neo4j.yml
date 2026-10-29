@@ -1,53 +1,44 @@
+#Reconstruye el grafo de Neo4j a partir de los resultados del último release. Solo manual
 name: Recargar datos históricos en Neo4j
-
-# Reconstruye el grafo desde cero a partir de los resultados de TB-Profiler del último
-# release de datos y de metadata_cleaned.csv. Siempre borra todo el grafo antes de cargar,
-# para no dejar nodos de versiones anteriores. El borrado ocurre después de generar los
-# CSV: si ese paso falla, la base queda intacta.
-
 on:
   workflow_dispatch:
 
-# Mismo grupo que "Actualizar pipeline TB-MX": nunca escriben en Neo4j al mismo tiempo
-# (dos recargas a la vez se bloquean entre sí al borrar). La segunda espera a la primera.
 concurrency:
   group: pipeline-tb-mx
-  cancel-in-progress: false
+  cancel-in-progress: false #No permite dos recargas a la vez, espera. Mismas acciones que Actualizar
 
 jobs:
   reload:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v5
+        uses: actions/checkout@v5 #copia codigos y metadata a la maquina virtual
 
       - name: Configurar Python 3.11
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v6 #solo requiere python
         with:
           python-version: "3.11"
           cache: pip
 
       - name: Instalar dependencias de Python
-        run: pip install neo4j pandas
+        run: pip install neo4j pandas #librerías necesarias
 
-      # Mismo criterio que "Actualizar pipeline TB-MX": el release de datos más reciente,
-      # que contiene todos los resultados (históricos + los de cada actualización)
       - name: Descargar resultados JSON del último release de datos
         run: |
           mkdir -p ~/json_cache
-          LATEST_TAG=$(gh release list --repo ${{ github.repository }} \
+          LATEST_TAG=$(gh release list --repo ${{ github.repository }} \ #busca release mas reciente
             --json tagName,name \
             --jq '[.[] | select(.tagName | contains("data"))] | .[0].tagName')
-          echo "Usando release: $LATEST_TAG"
+          echo "Usando release: $LATEST_TAG" #imprime que release se esta usando
 
-          gh release download "$LATEST_TAG" \
+          gh release download "$LATEST_TAG" \ #descarga release
             --repo ${{ github.repository }} \
             --pattern "tb_mx_results_*.tar.gz" \
             --dir /tmp/
 
-          TARFILE=$(ls /tmp/tb_mx_results_*.tar.gz | head -1)
+          TARFILE=$(ls /tmp/tb_mx_results_*.tar.gz | head -1) #descomprime archivo
           tar -xzf "$TARFILE" -C ~/json_cache/ --strip-components=1 2>/dev/null || \
           tar -xzf "$TARFILE" -C ~/json_cache/
 
@@ -56,41 +47,36 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Todos los runs de la metadata se tratan como "nuevos", así se recargan todos los
-      # BioSamples (también los que no tienen resultado, que quedan como failed/no_data)
-      - name: Preparar metadata y lista de runs
-        run: |
+      - name: Preparar metadata y lista de runs #todas las muestras se tratan como nuevas
+        run: | 
           cp metadata_cleaned.csv ~/metadata_cleaned.csv
 
-          python3 << 'PYEOF'
+          python3 << 'PYEOF' #ejecuta con python
           import csv, os
 
-          csv_path = os.path.expanduser("~/metadata_cleaned.csv")
+          csv_path = os.path.expanduser("~/metadata_cleaned.csv") #rutas de las carpetas
           out_path = os.path.expanduser("~/new_runs.txt")
           json_dir = os.path.expanduser("~/json_cache/")
 
-          runs = []
+          runs = [] #junta todos los runs de la metadata
           with open(csv_path, newline="", encoding="utf-8-sig") as f:
               for row in csv.DictReader(f):
                   run = row.get("Run", "").strip()
                   if run:
                       runs.append(run)
 
-          runs_con_json = [r for r in runs
-                           if os.path.exists(os.path.join(json_dir, f"{r}.results.json"))]
-
-          with open(out_path, "w") as f:
+          with open(out_path, "w") as f: #escribe la lista a reconstruir
               f.write("\n".join(runs) + "\n")
 
-          print(f"Runs en el CSV    : {len(runs)}")
+          print(f"Runs en el CSV : {len(runs)}")
           print(f"Con JSON en cache : {len(runs_con_json)}")
-          print(f"Escrito en        : {out_path}")
+          print(f"Escrito en : {out_path}")
           PYEOF
 
       - name: Generar CSVs del grafo a partir de los JSONs
         run: python pipeline/03_build_graph_csvs.py
 
-      - name: Vaciar la base de datos
+      - name: Vaciar la base de datos #borra base de datos para evitar duplicar
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
@@ -100,33 +86,29 @@ jobs:
           import os
           from neo4j import GraphDatabase
 
-          driver = GraphDatabase.driver(os.environ["NEO4J_URI"],
-                                        auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"]))
-          def borrar_lote(tx):
+          driver = GraphDatabase.driver(os.environ["NEO4J_URI"], auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"])) #se conecta a neo4j
+          def borrar_lote(tx):  #borra toda la base en lotes de 1000 nodos para no exceder la memoria
               return tx.run("""
                   MATCH (n) WITH n LIMIT 1000
                   DETACH DELETE n
                   RETURN count(*) AS borrados
               """).single()["borrados"]
-
           with driver.session() as session:
-              # Por lotes de 1000 nodos, para no exceder la memoria de la instancia gratuita.
-              # execute_write reintenta solo si Neo4j reporta un error transitorio (p. ej. deadlock).
-              while session.execute_write(borrar_lote) > 0:
+              while session.execute_write(borrar_lote) > 0:  #reintenta si hay error
                   pass
               n = session.run("MATCH (n) RETURN count(n) AS n").single()["n"]
-              print(f"Base de datos vaciada - nodos restantes: {n}")
+              print(f"Base de datos vaciada - nodos restantes: {n}") #comprueba base vacía
           driver.close()
           EOF
 
       - name: Cargar todo a Neo4j
-        run: python pipeline/04_load_neo4j.py
+        run: python pipeline/04_load_neo4j.py #carga csvs a la base
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
 
-      - name: Resumen
+      - name: Resumen  #Resumen que se muestra en la corrida
         if: always()
         run: |
           echo "## Recarga de Neo4j completada" >> $GITHUB_STEP_SUMMARY
