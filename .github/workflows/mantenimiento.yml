@@ -63,7 +63,6 @@ jobs:
           
       - name: Consultar la página de Streamlit
         if: always()
-        continue-on-error: true
         run: |  #abre la página, si esta dormida la despierta
           python3 - <<'EOF'
           import re
@@ -81,6 +80,7 @@ jobs:
               boton.click()
               print("La app estaba dormida: se pulsó el botón para despertarla")
             except PWTimeout:
+              print("La app estaba despierta")
             page.wait_for_timeout(60000) #manitene la ventana abierta para que la vista cuenta 
             browser.close()
           EOF
