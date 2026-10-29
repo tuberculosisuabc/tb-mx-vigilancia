@@ -1,38 +1,38 @@
+#Workflow principal del sistema
 name: Actualizar pipeline TB-MX
-
-# Busca muestras nuevas en NCBI, las analiza con TB-Profiler, las carga en Neo4j,
-# guarda la metadata actualizada en el repositorio y publica los resultados JSON
-# como un release de GitHub.
+# Corre los archivos de pipeline:
+# 1. Busca muestras nuevas en NCBI
+# 2. Ananliza muestras con TB-Profiler
+# 3. Crea CSVs y guarda metada y JSONs
+# 4. Carga resultados a Neo4j 
 
 on:
   workflow_dispatch:            # ejecución manual desde la pestaña Actions
   schedule:
-    - cron: '0 6 1 */2 *'       # automático: día 1 de cada dos meses, 06:00 UTC
+    - cron: '0 6 1 */2 *'       # automático: cada dos meses, dia 1 a las 6am
 
-concurrency: #No permite dos corridas/actualizaciones a la vez
+concurrency: #No permite dos corridas/actualizaciones a la vez (Automática y Manual)
   group: pipeline-tb-mx
-  cancel-in-progress: false
+  cancel-in-progress: false #No cancela la corrida, espera a que la otra termine
   
 jobs:
   pipeline:
-    runs-on: ubuntu-latest
-    timeout-minutes: 340        # 5 h 40 min (suficiente para ~30 muestras nuevas)
+    runs-on: ubuntu-latest  #Máquina virtual
+    timeout-minutes: 340  #Limite basado en GitHub (6horas) permite ~30 muetsras 
     permissions:
-      contents: write           # crear el release y guardar metadata_cleaned.csv
-      actions: write            # relanzar el workflow si quedan runs pendientes
+      contents: write  # crear el release y guardar metadata_cleaned.csv
+      actions: write # relanzar el workflow si quedan runs pendientes
     defaults:
       run:
-        shell: bash -el {0}     # shell de login para que cada paso use el entorno de conda
+        shell: bash -el {0}  # shell de login para que cada paso use el entorno de conda
 
     steps:
-      # --- 1. Instalar software ---
-      - name: Descargar repositorio
+      # 1. Instalar el software
+      - name: Descargar repositorio #Copia códigos y metadata del repositorio a la máquina
         uses: actions/checkout@v5
 
-      # TB-Profiler se distribuye por bioconda (no está en PyPI).
-      # Bioconda también instala bwa, samtools, bcftools y SRA Toolkit.
-      - name: Configurar conda (Miniforge)
-        uses: conda-incubator/setup-miniconda@v4
+      - name: Configurar conda (Miniforge) # TB-Profiler se distribuye por bioconda 
+        uses: conda-incubator/setup-miniconda@v4 # Bioconda también instala bwa, samtools, bcftools y SRA Toolkit.
         with:
           miniforge-version: latest
           activate-environment: tbmx
@@ -40,118 +40,109 @@ jobs:
           channels: conda-forge,bioconda
           channel-priority: strict
 
-      # Versiones fijadas para coincidir con los resultados históricos (corrida de junio 2025).
-      # 02_run_tbprofiler.py rechaza cualquier resultado generado con otras versiones.
       - name: Instalar TB-Profiler y herramientas bioinformáticas
-        run: |
+        run: | #Versiones fijadas, necesario para comparar resultados 
           conda install -y tb-profiler=6.6.6 sra-tools entrez-direct \
             biopython neo4j-python-driver pandas pyyaml
-          tb-profiler version
+          tb-profiler version #Muestra las versiones para verificación
           prefetch --version
 
-      # --force reemplaza la base de datos que viene incluida en el paquete de conda
-      - name: Instalar base de datos tbdb (commit 0a909094, 5 ago 2025)
-        run: |
+      - name: Instalar base de datos tbdb (commit 0a909094) 
+        run: | #reemplazar la base de datos de conda con la base de mutaciones de resistencia tb (tbdb)
           git clone https://github.com/jodyphelan/tbdb.git /tmp/tbdb
           cd /tmp/tbdb
-          git checkout 0a909094
-          tb-profiler create_db --prefix tbdb --load --force
+          git checkout 0a909094 #se fija un commit para que los resultados sena reproducibles
+          tb-profiler create_db --prefix tbdb --load --force #fuerza el cambio de base 
 
-      # --- 2. Restaurar resultados previos de TB-Profiler desde el último release de datos ---
+      # 2. Restaurar los resultados previos de TB-Profiler a partir del último release
       - name: Restaurar JSONs históricos
-        run: |
-          mkdir -p ~/json_cache
-          LATEST_TAG=$(gh release list --repo ${{ github.repository }} \
+        run: | 
+          mkdir -p ~/json_cache #Accede a resultados
+          LATEST_TAG=$(gh release list --repo ${{ github.repository }} \ #busca release mas reciente
             --json tagName,name \
             --jq '[.[] | select(.tagName | contains("data"))] | .[0].tagName')
-          echo "Usando release: $LATEST_TAG"
+          echo "Usando release: $LATEST_TAG" #Indica en la corrida que release se utiliza
 
-          gh release download "$LATEST_TAG" \
+          gh release download "$LATEST_TAG" \ #descarga el archivo comprimido
             --repo ${{ github.repository }} \
             --pattern "tb_mx_results_*.tar.gz" \
             --dir /tmp/
 
-          TARFILE=$(ls /tmp/tb_mx_results_*.tar.gz | head -1)
+          TARFILE=$(ls /tmp/tb_mx_results_*.tar.gz | head -1) #descomprime archivo
           tar -xzf "$TARFILE" -C ~/json_cache/ --strip-components=1 2>/dev/null || \
           tar -xzf "$TARFILE" -C ~/json_cache/
 
-          COUNT=$(ls ~/json_cache/*.results.json 2>/dev/null | wc -l)
+          COUNT=$(ls ~/json_cache/*.results.json 2>/dev/null | wc -l) #cuenta los JSONs restaurados
           echo "JSONs restaurados: $COUNT"
-          echo "json_count=$COUNT" >> $GITHUB_ENV
+          echo "json_count=$COUNT" >> $GITHUB_ENV #Indica en la corrida la cantidad de JSONs restaurados
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- 3. Ejecutar el pipeline ---
-      # Los scripts leen y escriben ~/metadata_cleaned.csv, por eso se copia la versión del repo
+      # 3. Ejecutar el pipeline 
       - name: Copiar metadata_cleaned.csv al directorio de trabajo
         run: cp metadata_cleaned.csv ~/metadata_cleaned.csv
 
       - name: "Paso 1: Buscar runs nuevos en NCBI"
-        run: python pipeline/01_fetch_ncbi.py
+        run: python pipeline/01_fetch_ncbi.py #Consulta NCBI, agrega muestras a metadata, escribe new_runs.txt, pending_runs.txt y new_no_run_biosample.txt
 
-      - name: Verificar si hay runs nuevos
+      - name: Verificar si hay runs nuevos #Lee archivos resultantes del paso 1 y decide siguientes pasos
         id: check
         run: |
-          PENDING=$(cat ~/pending_runs.txt 2>/dev/null || echo 0)
+          PENDING=$(cat ~/pending_runs.txt 2>/dev/null || echo 0) #Runs que quedaron fuera por el limte (MAX_RUNS=25)
           echo "pending=$PENDING" >> $GITHUB_OUTPUT
-          # BioSamples nuevos sin run en SRA: no pasan por TB-Profiler, pero sí se
-          # cargan a Neo4j y se guardan en la metadata
-          NO_RUN=$(cat ~/new_no_run_biosamples.txt 2>/dev/null || echo 0)
+          NO_RUN=$(cat ~/new_no_run_biosamples.txt 2>/dev/null || echo 0) #BioSamples sin SRA run no pasan a TB-Profiler pero si a Neo4j
           echo "no_run=$NO_RUN" >> $GITHUB_OUTPUT
           echo "$NO_RUN BIOSAMPLES NUEVOS SIN RUN EN SRA"
-          if [ -f ~/new_runs.txt ] && [ -s ~/new_runs.txt ]; then
+          if [ -f ~/new_runs.txt ] && [ -s ~/new_runs.txt ]; then #Revisa si hay nuevos runs a procesar 
             COUNT=$(wc -l < ~/new_runs.txt | tr -d ' ')
             echo "has_new=true"  >> $GITHUB_OUTPUT
             echo "count=$COUNT"  >> $GITHUB_OUTPUT
             echo "$COUNT RUNS NUEVOS A PROCESAR:"
             cat ~/new_runs.txt
-            # Aviso visible arriba en la corrida (sección Annotations)
-            if [ "$PENDING" -gt 0 ]; then
-              echo "::warning title=Runs pendientes::Se encontraron $((COUNT + PENDING)) runs nuevos; se procesan $COUNT en esta corrida y quedan $PENDING pendientes. El pipeline se relanzará automáticamente al terminar."
+            if [ "$PENDING" -gt 0 ]; then  #Aviso visible en la corrida, si hay runs pendientes 
+              echo "::warning title=Runs pendientes::Se encontraron $((COUNT + PENDING)) runs nuevos; $COUNT se procesan en esta corrida, $PENDING pendientes"
             fi
           else
             echo "has_new=false" >> $GITHUB_OUTPUT
             echo "count=0"       >> $GITHUB_OUTPUT
             echo "SIN RUNS NUEVOS."
           fi
-          if [ -s ~/new_runs.txt ] || [ "$NO_RUN" -gt 0 ]; then
+          if [ -s ~/new_runs.txt ] || [ "$NO_RUN" -gt 0 ]; then #Si hay runs nuevos o Biosamples nuevos sin run
             echo "has_changes=true"  >> $GITHUB_OUTPUT
           else
             echo "has_changes=false" >> $GITHUB_OUTPUT
-            echo "SIN CAMBIOS - PIPELINE TERMINADO."
+            echo "SIN CAMBIOS - PIPELINE TERMINADO." #No hay runs a procesar por TB-Profiler
           fi
 
       - name: "Paso 2: Correr TB-Profiler en los runs nuevos"
-        if: steps.check.outputs.has_new == 'true'
-        run: python pipeline/02_run_tbprofiler.py
-
+        if: steps.check.outputs.has_new == 'true' 
+        run: python pipeline/02_run_tbprofiler.py  #Descarga lecturas y corre TB-Profiler
+ 
       - name: "Paso 3: Generar CSVs del grafo"
         if: steps.check.outputs.has_changes == 'true'
-        run: python pipeline/03_build_graph_csvs.py
+        run: python pipeline/03_build_graph_csvs.py #Convierte JSONs y metadata en CSVs 
 
       - name: "Paso 4: Cargar a Neo4j"
         if: steps.check.outputs.has_changes == 'true'
-        run: python pipeline/04_load_neo4j.py
+        run: python pipeline/04_load_neo4j.py #Carga CSVs a Neo4j, requiere credenciales
         env:
           NEO4J_URI:      ${{ secrets.NEO4J_URI }}
           NEO4J_USER:     ${{ secrets.NEO4J_USER }}
           NEO4J_PASSWORD: ${{ secrets.NEO4J_PASSWORD }}
 
-      # --- 4. Publicar todos los resultados JSON (históricos + nuevos) como release ---
-      # Solo se ejecuta si la carga a Neo4j terminó bien
+      # 4. Publicar todos los resultados JSON (históricos + nuevos) como un nuevo release 
       - name: Empacar resultados JSON
-        if: steps.check.outputs.has_new == 'true'
+        if: steps.check.outputs.has_new == 'true' # Solo se ejecuta si la carga a Neo4j terminó bien
         run: |
           TOTAL=$(ls ~/json_cache/*.results.json | wc -l)
           echo "JSONs a empacar: $TOTAL"
-          tar -czf /tmp/tb_mx_results_latest.tar.gz -C ~/json_cache .
-          ls -lh /tmp/tb_mx_results_latest.tar.gz
+          tar -czf /tmp/tb_mx_results_latest.tar.gz -C ~/json_cache .  #comprime ~/json en un archivo .tar.gz
+          ls -lh /tmp/tb_mx_results_latest.tar.gz   #Imprime el tamaño del archivo
 
       - name: Publicar release de datos
         if: steps.check.outputs.has_new == 'true'
         run: |
-          # Incluye la hora: si el pipeline se relanza, puede publicar varios releases el mismo día
-          TAG="v$(date +'%Y.%m.%d-%H%M')-data"
+          TAG="v$(date +'%Y.%m.%d-%H%M')-data" #Nombra release con fecha y hora, ya que puede haber varios en un mismo día si se sobrepasa el límite de corridas
           TOTAL=$(ls ~/json_cache/*.results.json | wc -l)
           gh release create "$TAG" \
             --repo ${{ github.repository }} \
@@ -161,23 +152,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- 5. Guardar la metadata, solo al final ---
-      # Va después del release a propósito: una muestra solo queda marcada como procesada
-      # en metadata_cleaned.csv cuando su JSON ya está guardado en un release. Si el release
-      # falla, la metadata no se guarda y la siguiente corrida vuelve a procesar esas muestras.
+      # 5. Guardar la metadata de las nuevas muestras
+      #Va al final para solo guardar muestras que fueron procesadas, asi si falla, puede ser procesada en el sig actualización
       - name: Guardar metadata_cleaned.csv actualizado
         if: steps.check.outputs.has_changes == 'true'
         run: |
-          cp ~/metadata_cleaned.csv metadata_cleaned.csv
-          git config user.name  "github-actions[bot]"
+          cp ~/metadata_cleaned.csv metadata_cleaned.csv #copa la metadata
+          git config user.name  "github-actions[bot]"  #identidad con la que aparece el commit
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add metadata_cleaned.csv
-          git commit -m "Update metadata_cleaned.csv (${{ steps.check.outputs.count }} new runs, ${{ steps.check.outputs.no_run }} BioSamples without run)" || echo "Sin cambios en el CSV"
-          git pull --rebase
-          git push
+          git add metadata_cleaned.csv  
+          git commit -m "Actualización de metadata_cleaned.csv (${{ steps.check.outputs.count }} runs nuevos, ${{ steps.check.outputs.no_run }} BioSamples sin runs)" || echo "Sin cambios en el CSV"
+          git pull --rebase 
+          git push 
 
-      # --- 6. Resumen ---
-      - name: Resumen del pipeline
+      # 6. Resumen
+      - name: Resumen del pipeline  #Aparece en la página de la corrida, resumen de los cambios generados
         if: always()
         run: |
           echo "## Resultado del pipeline TB-MX" >> $GITHUB_STEP_SUMMARY
@@ -202,12 +191,11 @@ jobs:
             echo "| Relanzamiento | Automático si la corrida terminó bien (ver último paso) |" >> $GITHUB_STEP_SUMMARY
           fi
 
-      # --- 7. Relanzar si quedaron runs pendientes ---
-      # Solo si toda la corrida terminó bien; si algo falló, no se relanza para no repetir el error.
+      # 7. Relanzar pipeline si quedaron runs pendientes 
       - name: Relanzar el pipeline para los runs pendientes
-        if: success() && steps.check.outputs.has_new == 'true' && steps.check.outputs.pending != '0'
+        if: success() && steps.check.outputs.has_new == 'true' && steps.check.outputs.pending != '0' #solo se ejecuta si la corrdia termino bien, si falla se detiene
         run: |
-          gh workflow run pipeline.yml --repo ${{ github.repository }} --ref ${{ github.ref_name }}
+          gh workflow run pipeline.yml --repo ${{ github.repository }} --ref ${{ github.ref_name }} #lanza el mismo workflow
           echo "Pipeline relanzado: quedan ${{ steps.check.outputs.pending }} runs pendientes"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
