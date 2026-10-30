@@ -1,4 +1,4 @@
-﻿# Credenciales
+﻿# Credenciales, las contraseñas de Neo4j
 .streamlit/secrets.toml
 .env
 
@@ -10,11 +10,11 @@ new_runs.txt
 *.log
 failed_samples.csv
 
-# Python
+# Python y entornos virtuales
 __pycache__/
 *.pyc
 venv/
 
-# IDE
+# Configuración de editores
 .idea/
 .vscode/
