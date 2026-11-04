@@ -1,105 +1,82 @@
-import re
+#Funciones de acceso a Neo4j para la página web
+import re   #expresiones regulares
+import streamlit as st  #para caché y lectura de credenciales
+from neo4j import GraphDatabase  #driver de Neo4j
 
-import streamlit as st
-from neo4j import GraphDatabase
-
-
-# ── Conexión (en caché durante toda la sesión) ──────────────────────
-@st.cache_resource
+@st.cache_resource #Conexión, en caché
 def get_driver():
     return GraphDatabase.driver(
         st.secrets["NEO4J_URI"],
         auth=(st.secrets["NEO4J_USER"], st.secrets["NEO4J_PASSWORD"]),
     )
 
-
-# ── Consultas de solo lectura ───────────────────────────────────────
-# La protección real es execute_read: Neo4j rechaza cualquier escritura dentro
-# de una transacción de lectura. La lista de palabras solo sirve para mostrar
-# un mensaje claro antes de enviar la consulta.
-_FORBIDDEN = re.compile(
+_FORBIDDEN = re.compile( #Protección a la base de datos, palabras prohibidas en el cypher para evitar que visitantes modifiquen la base
     r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD|CALL|FOREACH)\b",
     re.IGNORECASE,
-)
+) 
 
-
-def query(cypher: str, params: dict = None) -> list[dict]:
-    """Ejecuta una consulta de solo lectura y devuelve una lista de diccionarios.
-    Lanza ValueError si la consulta contiene una operación de escritura."""
-    found = _FORBIDDEN.search(cypher)
+def query(cypher: str, params: dict = None) -> list[dict]: #Ejecuta funciones como Cypher de solo lectura y devuleven una lista de diccionarios
+    found = _FORBIDDEN.search(cypher) #busca palabras prohibidas
     if found:
-        raise ValueError(f"Operación de escritura no permitida: {found.group(1).upper()}")
-    with get_driver().session() as session:
-        return session.execute_read(
-            lambda tx: [dict(r) for r in tx.run(cypher, params or {})]
+        raise ValueError(f"Operación de escritura no permitida: {found.group(1).upper()}") #mensaje si se quiere hacer escritura, no permitida
+    with get_driver().session() as session: #abre sesión
+        return session.execute_read( #transacción de solo lectura
+            lambda tx: [dict(r) for r in tx.run(cypher, params or {})] #ejecuta y convierte resultados en diccionario
         )
 
-
-# ══════════════════════════════════════════════════════════════════════
-# RESUMEN — tarjetas KPI y embudo
-# ══════════════════════════════════════════════════════════════════════
-@st.cache_data(ttl=3600)
-def get_kpis() -> dict:
-    # Una muestra = un BioSample; sus resultados vienen del mejor run (ver pipeline/03)
+# Funciones para Inicio.py, conteos generales
+@st.cache_data(ttl=3600) #caché de 1 hora
+def get_kpis() -> dict:  
     rows = query("""
-        MATCH (s:BioSample)
-        WHERE coalesce(s.is_mtb, 'Yes') = 'Yes'
+        MATCH (s:BioSample)  
+        WHERE coalesce(s.is_mtb, 'Yes') = 'Yes'  
         RETURN
-          count(s)                                             AS total,
-          sum(CASE WHEN s.is_mdr  = 'Yes' THEN 1 ELSE 0 END) AS mdr,
-          sum(CASE WHEN s.is_xdr  = 'Yes' THEN 1 ELSE 0 END) AS xdr,
+          count(s) AS total,
+          sum(CASE WHEN s.is_mdr = 'Yes' THEN 1 ELSE 0 END) AS mdr, 
+          sum(CASE WHEN s.is_xdr = 'Yes' THEN 1 ELSE 0 END) AS xdr,
           sum(CASE WHEN s.qc_pass = 'PASS' THEN 1 ELSE 0 END) AS qc_pass
     """)
     r = rows[0]
     r["mdr_rate"] = round(r["mdr"] / r["qc_pass"] * 100, 1) if r["qc_pass"] else 0
     return r
 
-
+#Conteos de BioSamples para filtro, ok=resultado de TB-Profiler
 @st.cache_data(ttl=3600)
-def get_data_overview() -> dict:
-    """Conteos por BioSample para las tarjetas y gráficas de Inicio.
-    processing_status: 'ok' (con resultado de TB-Profiler), 'failed' (el análisis
-    falló), 'no_data' (sus runs no tienen lecturas en SRA) o 'no_run' (sin run de
-    WGS en SRA; solo metadata de BioSample)."""
+def get_data_overview() -> dict: 
     s = query("""
         MATCH (s:BioSample)
         RETURN
-            count(s)                                                          AS total_biosamples,
+            count(s) AS total_biosamples,
             sum(CASE WHEN s.processing_status IN ['ok', 'failed'] THEN 1 ELSE 0 END) AS with_data,
-            sum(CASE WHEN s.processing_status = 'ok'       THEN 1 ELSE 0 END) AS processed,
-            sum(CASE WHEN s.processing_status = 'failed'   THEN 1 ELSE 0 END) AS failed,
-            sum(CASE WHEN s.processing_status = 'no_data'  THEN 1 ELSE 0 END) AS no_data,
-            sum(CASE WHEN s.processing_status = 'no_run'   THEN 1 ELSE 0 END) AS no_run,
+            sum(CASE WHEN s.processing_status = 'ok' THEN 1 ELSE 0 END) AS processed,
+            sum(CASE WHEN s.processing_status = 'failed' THEN 1 ELSE 0 END) AS failed,
+            sum(CASE WHEN s.processing_status = 'no_data' THEN 1 ELSE 0 END) AS no_data,
+            sum(CASE WHEN s.processing_status = 'no_run' THEN 1 ELSE 0 END) AS no_run,
             sum(CASE WHEN s.qc_pass = 'PASS' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS qc_pass,
-            sum(CASE WHEN s.qc_pass = 'FAIL' THEN 1 ELSE 0 END)               AS qc_fail,
-            sum(CASE WHEN s.is_mtb  = 'No'   THEN 1 ELSE 0 END)               AS no_mtb,
-            sum(CASE WHEN s.is_mdr  = 'Yes' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS mdr,
-            sum(CASE WHEN s.is_xdr  = 'Yes' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS xdr,
-            sum(coalesce(s.n_runs, 0))                                        AS total_runs
+            sum(CASE WHEN s.qc_pass = 'FAIL' THEN 1 ELSE 0 END) AS qc_fail,
+            sum(CASE WHEN s.is_mtb = 'No' THEN 1 ELSE 0 END) AS no_mtb,
+            sum(CASE WHEN s.is_mdr = 'Yes' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS mdr,
+            sum(CASE WHEN s.is_xdr = 'Yes' AND s.is_mtb = 'Yes' THEN 1 ELSE 0 END) AS xdr,
+            sum(coalesce(s.n_runs, 0)) AS total_runs
     """)[0]
     s["mdr_rate"] = round(s["mdr"] / s["qc_pass"] * 100, 1) if s["qc_pass"] else 0
     return s
 
-
-# ══════════════════════════════════════════════════════════════════════
-# TENDENCIA MDR (los conteos por año ya usan solo genomas con QC aprobado)
-# ══════════════════════════════════════════════════════════════════════
+#A partir de aqui, todos los conteos/estadísiticas son con genomas con qc aprobado 
+#Tendencia MDR por año, lee conteos ya calculados en el nodo TimePoint
 @st.cache_data(ttl=3600)
 def get_mdr_trend() -> list[dict]:
     return query("""
-        MATCH (t:TimePoint)
+        MATCH (t:TimePoint)  
         WHERE t.sample_count > 0
         RETURN t.year AS year, t.sample_count AS total,
                t.mdr_count AS mdr, t.mdr_rate AS mdr_rate
         ORDER BY t.year
     """)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# LINAJES
-# ══════════════════════════════════════════════════════════════════════
+# Linajes y sublinajes
 @st.cache_data(ttl=3600)
-def get_lineage_dist() -> list[dict]:
+def get_lineage_dist() -> list[dict]: #conteos por linajes
     return query("""
         MATCH (l:Lineage)
         OPTIONAL MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:BELONGS_TO]->(l)
@@ -110,9 +87,8 @@ def get_lineage_dist() -> list[dict]:
         ORDER BY count DESC
     """)
 
-
 @st.cache_data(ttl=3600)
-def get_lineage_by_year() -> list[dict]:
+def get_lineage_by_year() -> list[dict]:  #linajes por año
     return query("""
         MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:BELONGS_TO]->(lin:Lineage),
               (s)-[:DETECTED_IN]->(t:TimePoint)
@@ -120,10 +96,7 @@ def get_lineage_by_year() -> list[dict]:
         ORDER BY year, n DESC
     """)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# MAPA — casos por estado (solo genomas con QC aprobado)
-# ══════════════════════════════════════════════════════════════════════
+#Mapa, obtiene conteo de casos totales, MDR y XDR por estado 
 @st.cache_data(ttl=3600)
 def get_cases_by_state() -> list[dict]:
     return query("""
@@ -138,10 +111,7 @@ def get_cases_by_state() -> list[dict]:
         ORDER BY total DESC
     """)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# RESISTENCIA / FÁRMACOS
-# ══════════════════════════════════════════════════════════════════════
+# Resistencia, conteo de muestras por categoría de resistencia basado en drtype de TB-Profiler
 @st.cache_data(ttl=3600)
 def get_resistance_profile() -> list[dict]:
     return query("""
@@ -154,7 +124,7 @@ def get_resistance_profile() -> list[dict]:
         ORDER BY count DESC
     """)
 
-
+#Farmacorresistencia, conteo y clasificación de la OMS
 @st.cache_data(ttl=3600)
 def get_drug_resistance_counts() -> list[dict]:
     return query("""
@@ -163,54 +133,43 @@ def get_drug_resistance_counts() -> list[dict]:
         ORDER BY count DESC
     """)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# MUTACIONES
-# ══════════════════════════════════════════════════════════════════════
+# Mutaciones, 
 @st.cache_data(ttl=3600)
-def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]:
-    """Mutaciones de resistencia más frecuentes. Si se indican fármacos, el top N
-    se calcula solo entre las mutaciones asociadas a esos fármacos."""
+def get_top_dr_mutations(limit: int = 20, drugs: tuple = ()) -> list[dict]: #Mutaciones mas frecuentes
     return query("""
         MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation {variant_class: 'dr_variant'})
               -[c:CONFERS_RESISTANCE]->(d:Drug)
-        WHERE m.gene IS NOT NULL AND m.gene <> ''
+        WHERE m.gene IS NOT NULL AND m.gene <> ''   // descarta mutaciones sin nombre de gen
           AND (size($drugs) = 0 OR d.name IN $drugs)
-        // Un nodo por mutación; los fármacos a los que confiere resistencia son relaciones
-        WITH m,
-             collect(DISTINCT d.name)       AS drugs,
+        WITH m,         // Un nodo por mutación
+             collect(DISTINCT d.name) AS drugs,
              collect(DISTINCT c.confidence) AS confidences,
-             count(DISTINCT s)              AS sample_count
+             count(DISTINCT s) AS sample_count
         RETURN m.gene AS gene,
-               CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change,
+               CASE WHEN m.aa_change <> '' THEN m.aa_change ELSE m.nt_change END AS change, //datos de la mutación
                drugs, confidences, sample_count
         ORDER BY sample_count DESC
         LIMIT $limit
     """, {"limit": limit, "drugs": list(drugs)})
 
-
 @st.cache_data(ttl=3600)
-def get_mutation_network(min_samples: int = 5) -> list[dict]:
-    """Nodos y aristas de la red mutación–fármaco."""
+def get_mutation_network(min_samples: int = 5) -> list[dict]: #datos de la red y mapa de calor
     return query("""
         MATCH (s:BioSample {is_mtb: 'Yes'})-[:HAS_MUTATION]->(m:Mutation {variant_class: 'dr_variant'})
               -[:CONFERS_RESISTANCE]->(d:Drug)
-        WITH m, d, count(DISTINCT s) AS n
-        WHERE n >= $min_samples
+        WITH m, d, count(DISTINCT s) AS n  //agrupa mutación-fármaco
+        WHERE n >= $min_samples  //condición filtro del usuario
         RETURN m.mutation_id  AS mut_id,
-               m.gene         AS gene,
-               m.aa_change    AS aa_change,
-               d.name         AS drug,
-               d.drug_class   AS drug_class,
-               n              AS sample_count
+               m.gene AS gene,
+               m.aa_change AS aa_change,
+               d.name AS drug,
+               d.drug_class AS drug_class,
+               n AS sample_count
         ORDER BY n DESC
     """, {"min_samples": min_samples})
 
-
 @st.cache_data(ttl=3600)
-def get_other_variants(limit: int = 20) -> dict:
-    """Variantes en genes de resistencia que el catálogo no asocia con resistencia
-    (other_variant): totales y las más frecuentes."""
+def get_other_variants(limit: int = 20) -> dict: #Otras variantes no asociadas a resistencia por catalogo OMS
     resumen = query("""
         MATCH (s:BioSample {qc_pass: 'PASS', is_mtb: 'Yes'})-[:HAS_MUTATION]->
               (m:Mutation {variant_class: 'other_variant'})
@@ -229,10 +188,7 @@ def get_other_variants(limit: int = 20) -> dict:
     """, {"limit": limit})
     return {**resumen, "top": top}
 
-
-# ══════════════════════════════════════════════════════════════════════
-# TABLA DE MUESTRAS
-# ══════════════════════════════════════════════════════════════════════
+#Filtros para la pestaña de Muestras, filtros como condiciones WHERE
 @st.cache_data(ttl=3600)
 def get_samples_table(
     drtype_filter: list = None,
@@ -255,11 +211,8 @@ def get_samples_table(
         where_clauses.append("t.year = $year")
         params["year"] = year_filter
 
-    where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
-
-    # El WITH es necesario: un WHERE escrito justo después de OPTIONAL MATCH solo
-    # condiciona ese OPTIONAL MATCH y no elimina filas, así que los filtros no se
-    # aplicarían.
+    where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else "" #une condiciones
+    
     return query(f"""
         MATCH (s:BioSample)
         OPTIONAL MATCH (s)-[:COLLECTED_IN]->(l:Location)
@@ -267,43 +220,38 @@ def get_samples_table(
         OPTIONAL MATCH (s)-[:DETECTED_IN]->(t:TimePoint)
         WITH s, l, lin, t
         {where_str}
-        // Profundidad: propiedad del run seleccionado; fármacos: relaciones RESISTANT_TO
         OPTIONAL MATCH (s)-[:HAS_RUN]->(r:SRARun)
         OPTIONAL MATCH (s)-[:RESISTANT_TO]->(d:Drug)
         WITH s, l, lin, t, r, collect(d.name) AS drugs
-        RETURN s.biosample_id     AS sample_id,
-               s.selected_run     AS run_id,
-               s.drtype           AS drtype,
+        RETURN s.biosample_id AS sample_id,
+               s.selected_run AS run_id,
+               s.drtype AS drtype,
                coalesce(lin.lineage_id, s.sub_lineage) AS lineage,
-               s.sub_lineage      AS sub_lineage,
-               s.is_mdr           AS is_mdr,
-               s.is_xdr           AS is_xdr,
+               s.sub_lineage AS sub_lineage,
+               s.is_mdr AS is_mdr,
+               s.is_xdr AS is_xdr,
                reduce(txt = '', x IN drugs |
                       txt + CASE WHEN txt = '' THEN '' ELSE '; ' END + x) AS resistant_drugs,
-               r.median_depth     AS median_depth,
+               r.median_depth AS median_depth,
                s.isolation_source AS isolation_source,
-               l.state            AS state,
-               t.year             AS year,
-               s.collection_date  AS collection_date
+               l.state AS state,
+               t.year AS year,
+               s.collection_date AS collection_date
         ORDER BY s.biosample_id
         LIMIT 2000
     """, params)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# FILTROS (para los menús desplegables)
-# ══════════════════════════════════════════════════════════════════════
+#Filtros para los menús desplegables
 @st.cache_data(ttl=3600)
-def get_states() -> list[str]:
+def get_states() -> list[str]: #todos los estados
     rows = query("""
         MATCH (l:Location) WHERE l.state <> ''
         RETURN l.state AS state ORDER BY state
     """)
     return ["Todos"] + [r["state"] for r in rows]
 
-
 @st.cache_data(ttl=3600)
-def get_drtypes() -> list[str]:
+def get_drtypes() -> list[str]: #categorias de resistencia
     rows = query("""
         MATCH (s:BioSample)
         WHERE s.drtype IS NOT NULL AND s.drtype <> '' AND s.is_mtb = 'Yes'
@@ -311,9 +259,8 @@ def get_drtypes() -> list[str]:
     """)
     return [r["drtype"] for r in rows]
 
-
 @st.cache_data(ttl=3600)
-def get_years() -> list[int]:
+def get_years() -> list[int]: #años con muestras
     rows = query("""
         MATCH (t:TimePoint) RETURN t.year AS year ORDER BY year
     """)
