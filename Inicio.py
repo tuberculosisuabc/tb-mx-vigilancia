@@ -20,7 +20,7 @@ page_header( #Titulo e introducción
     sample_size=False,  #no se muestra tamaño de muestra
 )
 
-section("Obtención y análisis de datos")
+section("Obtención y análisis de datos") #texto, descripción del flujo de trabajo
 st.markdown("""
     <p class='texto' style='line-height:2'>
         1. Obtención de datos desde NCBI, aplicando filtros específicos para obtener muestras de <i>M. tuberculosis</i> provenientes de México<br>
@@ -36,21 +36,22 @@ with st.spinner("Cargando datos..."):
     overview = get_data_overview() #Conteos
 
 overview_cards = [ # (valor, etiqueta, clase de color, descripción al pasar el cursor)
-    (overview["total_biosamples"], "BioSamples",        "kpi-green",
-     "Muestras biológicas de M. tuberculosis de México registradas en NCBI, con o sin run en SRA"),
-    (overview["with_data"],        "Con lecturas",      "kpi-green",
+    (overview["total_biosamples"], "BioSamples", "kpi-green",
+     "Muestras biológicas de <i>M. tuberculosis</i> de México registradas en NCBI, con o sin run en SRA"),
+    (overview["with_data"], "Con lecturas", "kpi-green",
      "BioSamples con lecturas disponibles en SRA"),
-    (overview["processed"],        "Analizados",        "kpi-green",
+    (overview["processed"], "Analizados", "kpi-green",
      "BioSamples analizados con TB-Profiler v6 (se usa el mejor run de cada uno)"),
-    (overview["qc_pass"],          "QC aprobado",       "kpi-green",
+    (overview["qc_pass"], "QC aprobado", "kpi-green",
      "Genomas de M. tuberculosis con cobertura y mapeo suficiente (base de todos los análisis)"),
-    (overview["mdr"],              "TB-MDR",            "kpi-amber",
+    (overview["mdr"],"TB-MDR","kpi-amber",
      "Muestras con resistencia a rifampicina e isoniacida"),
-    (overview["xdr"],              "TB-XDR",            "kpi-red",
+    (overview["xdr"],"TB-XDR","kpi-red",
      "Muestras con resistencia extensiva a fármacos"),
-    (f"{overview['mdr_rate']}%",   "Tasa TB-MDR",       "kpi-amber",
+    (f"{overview['mdr_rate']}%", "Tasa TB-MDR","kpi-amber",
      "Porcentaje de TB-MDR sobre los genomas con QC aprobado"),
 ]
+
 # Crea una columna por tarjeta y dibuja cada tarjeta con HTML.
 for col, (val, label, klass, tooltip) in zip(st.columns(len(overview_cards)), overview_cards):
     col.markdown(f"""
@@ -71,6 +72,11 @@ with ov_left: # Filtrado de  BioSamples despues de cada etapa
         x=[overview["total_biosamples"], overview["with_data"],
            overview["processed"], overview["qc_pass"]],
         textinfo="value+percent initial",
+        hovertemplate=("<b>%{y}</b><br>"  #texto al pasar el cursor
+                       "%{x} BioSamples<br>"
+                       "%{percentInitial:.1%} del total<br>"
+                       "%{percentPrevious:.1%} de la etapa anterior"
+                       "<extra></extra>"),
         marker=dict(color=["#2D6A4F", "#40916C", "#52B788", "#74C69D"]),
         connector=dict(line=dict(color="#C8C4BC", width=1)),
         textfont=dict(color="#FFFFFF", size=12),
@@ -80,7 +86,7 @@ with ov_left: # Filtrado de  BioSamples despues de cada etapa
 with ov_right:
     total = overview["total_biosamples"]
     groups = [  # Los grupos  suman el total de BioSamples (etiqueta, conteo, color, descripción)
-        ("QC aprobado", overview["qc_pass"],"#2D6A4F", "BioSamples de <i>M. tuberculosis</i> con QC aprobado ✓"),
+        ("QC aprobado", overview["qc_pass"],"#2D6A4F", "BioSamples de <i>M. tuberculosis</i> con QC aprobado"),
         ("QC rechazado", overview["qc_fail"], "#D4A017", "BioSamples con baja cobertura o mapeo insuficiente"),
         ("No M. tuberculosis", overview["no_mtb"], "#8B7355", "BioSamples no M. tuberculosis, excluidos de los análisis"),
         ("No procesados", overview["failed"], "#C44B2B", "BioSamples con error en la descarga o en TB-Profiler"),
@@ -97,6 +103,7 @@ with ov_right:
         hole=0.5,
         text=[f"{pct(g[1])}%" for g in groups],
         textinfo="text",
+        #texto al pasar el cursor
         hovertemplate="<b>%{label}</b><br>%{value} BioSamples<br>%{text} del total<extra></extra>",
         marker=dict(colors=[g[2] for g in groups], line=dict(color=BG, width=2)),
         textposition="outside",
