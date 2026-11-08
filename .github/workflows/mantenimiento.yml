@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest #Máquina virtual para hacer la corrida
     timeout-minutes: 10   
     permissions:
-      actions: write            # necesario para reactivar workflows con la API
+      actions: write  # necesario para reactivar workflows con la API
 
     steps:
       #1. Reactivar workflows (GitHub)
