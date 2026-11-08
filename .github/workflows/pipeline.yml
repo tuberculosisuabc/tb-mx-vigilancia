@@ -7,9 +7,9 @@ name: Actualizar pipeline TB-MX
 # 4. Carga resultados a Neo4j 
 
 on:
-  workflow_dispatch:            # ejecución manual desde la pestaña Actions
+  workflow_dispatch:  # ejecución manual desde la pestaña Actions
   schedule:
-    - cron: '0 6 1 */2 *'       # automático: cada dos meses, dia 1 a las 6am
+    - cron: '0 6 1 */2 *'  # automático: cada dos meses, dia 1 a las 6am
 
 concurrency: #No permite dos corridas/actualizaciones a la vez (Automática y Manual)
   group: pipeline-tb-mx
